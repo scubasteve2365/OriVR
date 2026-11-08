@@ -92,6 +92,9 @@ static ID3D11RenderTargetView* g_passRtv[2];
 static pD3DCompile g_compile;
 // In-eye stage pass: the eye image drawn onto the stage rectangle in each eye's full view (projection layer).
 static volatile LONG g_layerMode = 1;  // 1 = projection layer drawn in the eyes, 0 = the original per-eye quads
+static volatile LONG g_activeLayer = -1;  // what the last rendered frame really used: 1 projection, 0 quads, -1 none yet
+static int g_projState;  // 0 not tried yet, 1 ready, -1 failed. Built on first use, so the panel path pays nothing for it.
+static char g_runtimeName[128], g_systemName[256];
 static LONG g_loggedMode = -1;
 static ID3D11VertexShader* g_stageVs;
 static ID3D11PixelShader* g_stagePs;
@@ -338,6 +341,7 @@ float4 ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 )";
 
 static bool CreateStagePass() {
+    if (g_stageVs) return true;  // kept across VR off and on
     if (!g_compile || !g_passState) { Log("in-eye stage off: no shader compiler or context state, quads are used"); return false; }
     ID3DBlob* vsBlob = nullptr; ID3DBlob* psBlob = nullptr; ID3DBlob* err = nullptr;
     size_t len = strlen(g_stageShader);
@@ -387,6 +391,14 @@ static bool CreateProjectionSwapchains() {
     }
     Log("in-eye stage ready: eye views %dx%d, %zu images per eye", g_projW, g_projH, g_proj[0].images.size());
     return true;
+}
+
+static bool EnsureProjection() {
+    if (g_projState == 0) {
+        g_projState = (CreateStagePass() && CreateProjectionSwapchains()) ? 1 : -1;
+        if (g_projState < 0) g_projW = 0;
+    }
+    return g_projState == 1;
 }
 
 struct V3 { float x, y, z; };
@@ -608,8 +620,10 @@ static bool StartXr() {
     PFN_xrGetInstanceProperties props;
     if (GetFn("xrGetInstanceProperties", props)) {
         XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
-        if (XR_SUCCEEDED(props(g_inst, &ip)))
+        if (XR_SUCCEEDED(props(g_inst, &ip))) {
             Log("runtime %s %u.%u.%u", ip.runtimeName, XR_VERSION_MAJOR(ip.runtimeVersion), XR_VERSION_MINOR(ip.runtimeVersion), XR_VERSION_PATCH(ip.runtimeVersion));
+            strcpy_s(g_runtimeName, ip.runtimeName);
+        }
     }
 
     PFN_xrGetSystem getSystem;
@@ -617,6 +631,15 @@ static bool StartXr() {
     XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO};
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XRCHECK(getSystem(g_inst, &sgi, &g_sys));
+
+    PFN_xrGetSystemProperties sysProps;
+    if (GetFn("xrGetSystemProperties", sysProps)) {
+        XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        if (XR_SUCCEEDED(sysProps(g_inst, g_sys, &sp))) {
+            Log("headset %s, vendor %u", sp.systemName, sp.vendorId);
+            strcpy_s(g_systemName, sp.systemName);
+        }
+    }
 
     PFN_xrGetD3D11GraphicsRequirementsKHR req11;
     if (!GetFn("xrGetD3D11GraphicsRequirementsKHR", req11)) return false;
@@ -685,7 +708,6 @@ static bool StartXr() {
     }
     CreateSharpenPass();
     if (!CreateSwapchains()) return false;
-    if (!CreateStagePass() || !CreateProjectionSwapchains()) g_projW = 0;
 
     return GetFn("xrPollEvent", p_poll) && GetFn("xrBeginSession", p_beginSession) && GetFn("xrEndSession", p_endSession) &&
            GetFn("xrWaitFrame", p_waitFrame) && GetFn("xrBeginFrame", p_beginFrame) && GetFn("xrEndFrame", p_endFrame) &&
@@ -753,11 +775,12 @@ static void DoSubmit() {
     XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     const XrCompositionLayerBaseHeader* layers[2];
     uint32_t count = 0;
-    LONG mode = (g_layerMode && g_projW > 0 && f.viewsValid) ? 1 : 0;
+    LONG mode = (g_layerMode && f.viewsValid && EnsureProjection()) ? 1 : 0;
+    if (f.shouldRender) g_activeLayer = mode;
     if (f.shouldRender && mode != g_loggedMode) {
         g_loggedMode = mode;
         if (mode) Log("LAYER projection: stage drawn in the eyes, %dx%d per eye", g_projW, g_projH);
-        else Log("LAYER quads: stage as one floating panel per eye (%s)", !g_layerMode ? "chosen" : g_projW <= 0 ? "in-eye pass unavailable" : "no head tracking");
+        else Log("LAYER quads: stage as one floating panel per eye (%s)", !g_layerMode ? "chosen" : g_projState < 0 ? "in-eye pass unavailable" : "no head tracking");
     }
     if (f.shouldRender && mode) {
         if (DrawEye(0, f.src[0], f, views[0]) && DrawEye(1, f.src[1], f, views[1])) {
@@ -804,6 +827,8 @@ static void DoShutdown() {
         g_proj[e].images.clear();
     }
     g_projW = 0;
+    g_projState = 0;
+    g_activeLayer = -1;
     g_loggedMode = -1;
     g_inst = XR_NULL_HANDLE;
     g_sess = XR_NULL_HANDLE;
@@ -835,6 +860,11 @@ API void OriXR_SetSharpen(float amount) { g_sharpen = amount; }
 API void OriXR_DumpNext(const char* basePath) { strcpy_s(g_dumpPath, basePath); g_dumpWanted = 1; }
 API int OriXR_RecommendedWidth() { return g_recW; }
 API void OriXR_SetLayerMode(int mode) { g_layerMode = mode ? 1 : 0; }
+API int OriXR_ActiveLayer() { return (int)g_activeLayer; }
+API void OriXR_RuntimeInfo(char* runtime, int runtimeSize, char* system, int systemSize) {
+    strncpy_s(runtime, runtimeSize, g_runtimeName, _TRUNCATE);
+    strncpy_s(system, systemSize, g_systemName, _TRUNCATE);
+}
 
 // Call on the main thread before the init event. The textures must already exist in the Unity player.
 API void OriXR_Start(void* left, void* right, int width, int height) {

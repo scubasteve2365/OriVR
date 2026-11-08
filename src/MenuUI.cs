@@ -19,12 +19,15 @@ namespace OriVR
         internal Action<int, int> Adjust;  // row, direction
         internal Action<int> Activate;     // row
         internal Func<int, string> RowText;
+        internal Func<int, string> RowTip;
         internal Action Closed;
 
         internal bool IsOpen { get; private set; }
 
         GameObject root;
-        TextBox titleBox, hintBox;
+        TextBox titleBox, hintBox, tipBox;
+        string shownTip;
+        float nextRefresh;
         Transform bar, line;
         TextBox[] rows = new TextBox[Rows];
         string[] shown = new string[Rows];
@@ -44,6 +47,7 @@ namespace OriVR
             selected = 0;
             lastSelected = -1;
             for (int i = 0; i < Rows; i++) shown[i] = null;
+            shownTip = null;
             savedScale = Time.timeScale;
             Time.timeScale = 0f;
             aWas = bWas = true;  // ignore presses already held
@@ -88,14 +92,17 @@ namespace OriVR
             DontDestroyOnLoad(root);
             root.transform.position = new Vector3(0f, 0f, -3f);  // in front of the game's own HUD
             MakePanel(root.transform);
-            titleBox = MakeText(root.transform, style, 2.72f, 0.95f);
+            titleBox = MakeText(root.transform, style, 2.98f, 0.85f);
             titleBox.color = Title;
             Show(titleBox, "VR SETTINGS");
             for (int i = 0; i < Rows; i++)
             {
-                rows[i] = MakeText(root.transform, style, RowY(i), 0.66f);
+                rows[i] = MakeText(root.transform, style, RowY(i), 0.6f);
             }
-            hintBox = MakeText(root.transform, style, -2.72f, 0.5f);
+            tipBox = MakeText(root.transform, style, -2.4f, 0.38f);
+            tipBox.width = 10.4f;
+            tipBox.color = Title;
+            hintBox = MakeText(root.transform, style, -1.68f, 0.36f);
             hintBox.color = Dim;
             Show(hintBox, "Up and down: choose.   Left and right: change.   A: select.   B: close");
             SetLayer(root);
@@ -146,9 +153,9 @@ namespace OriVR
             }
             if (shader == null) { Plugin.Log.LogWarning("menu: no panel shader, text only"); return; }
             MakeQuad(parent, shader, "panel", 5.6f, 3.7f, 0.5f, SoftBox(128, 128, new Color(0.015f, 0.04f, 0.075f), 0.97f, 0.12f, 0.12f));
-            bar = MakeQuad(parent, shader, "bar", 4.2f, 0.27f, 0.25f, SoftBox(128, 16, new Color(0.2f, 0.5f, 0.85f), 0.55f, 0.5f, 0.5f));
+            bar = MakeQuad(parent, shader, "bar", 4.2f, 0.24f, 0.25f, SoftBox(128, 16, new Color(0.2f, 0.5f, 0.85f), 0.55f, 0.5f, 0.5f));
             line = MakeQuad(parent, shader, "line", 3.2f, 0.018f, 0.25f, SoftBox(128, 4, new Color(0.45f, 0.75f, 1f), 0.8f, 0.5f, 0f));
-            line.localPosition = new Vector3(0f, 2.25f, 0.25f);
+            line.localPosition = new Vector3(0f, 2.5f, 0.25f);
         }
 
         static Transform MakeQuad(Transform parent, Shader shader, string name, float w, float h, float z, Texture2D tex)
@@ -201,10 +208,19 @@ namespace OriVR
                 Show(rows[i], text);
             }
             if (bar != null) bar.localPosition = new Vector3(0f, RowY(selected), 0.25f);
+            if (RowTip != null)
+            {
+                var tip = RowTip(selected);
+                if (tip != shownTip)
+                {
+                    shownTip = tip;
+                    Show(tipBox, tip);
+                }
+            }
             lastSelected = selected;
         }
 
-        static float RowY(int row) { return 1.8f - row * 0.43f; }
+        static float RowY(int row) { return 2.14f - row * 0.38f; }
 
         void Update()
         {
@@ -232,6 +248,11 @@ namespace OriVR
                 return;
             }
             if (!IsOpen) return;
+            if (Time.realtimeSinceStartup >= nextRefresh)
+            {
+                nextRefresh = Time.realtimeSinceStartup + 0.5f;  // the Picture row reports what is really in use
+                Refresh();
+            }
 
             bool a = XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonA);
             bool b = XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonB);

@@ -43,6 +43,8 @@ namespace OriVR
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int PopLogFn(StringBuilder buffer, int size);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void StatsFn(out uint frames, out uint layers, out uint skipped);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetLayerModeFn(int mode);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ActiveLayerFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void RuntimeInfoFn(StringBuilder runtime, int runtimeSize, StringBuilder system, int systemSize);
 
         GetRenderEventFn OriXR_GetRenderEvent;
         StateFn OriXR_State;
@@ -55,7 +57,9 @@ namespace OriVR
         BeginFrameFn OriXR_BeginFrame;
         PopLogFn OriXR_PopLog;
         StatsFn OriXR_Stats;
-        SetLayerModeFn OriXR_SetLayerMode;  // missing in older OriVRNative builds
+        SetLayerModeFn OriXR_SetLayerMode;
+        ActiveLayerFn OriXR_ActiveLayer;
+        RuntimeInfoFn OriXR_RuntimeInfo;
 
         static T Fn<T>(IntPtr module, string name) where T : class
         {
@@ -72,9 +76,32 @@ namespace OriVR
         internal float Sharpen = 0.3f;       // strength of the sharpen pass, 0 is off
         internal bool StereoFixes = true;    // lab switch: the second-eye fixes below
         internal bool MatchRefresh = true;   // run one game tick per headset frame
-        // Draw the stage into each eye's full view (one projection layer) instead of one floating panel per eye. Virtual
-        // Desktop squashes and shears the per-eye panels when the head moves.
-        internal bool DrawInEyes = true;
+        // How the stage reaches the headset. Steady draws it into each eye's full view (one projection layer). Floating
+        // Panel hands it to the runtime as one quad layer per eye, which Virtual Desktop squashes and shears when the head
+        // moves. Auto chooses by OpenXR runtime.
+        internal int PictureMode;  // 0 Auto, 1 Steady, 2 Floating Panel
+        internal string RuntimeName = "", HeadsetName = "";
+        float firstValidView = -1f;
+
+        // Steve's rule for every mod: projection for Virtual Desktop, quad for every other runtime. Reference mods record
+        // VDXR's runtime name as "VirtualDesktopXR"; the match is loose because runtimes change exact names between versions.
+        internal static bool AutoPicksSteady(string runtime)
+        {
+            string name = (runtime ?? "").ToLowerInvariant().Replace(" ", "").Replace("-", "").Replace("_", "");
+            return name.IndexOf("virtualdesktop", StringComparison.Ordinal) >= 0 || name.IndexOf("vdxr", StringComparison.Ordinal) >= 0;
+        }
+
+        internal bool WantSteady { get { return PictureMode == 1 || (PictureMode == 0 && AutoPicksSteady(RuntimeName)); } }
+
+        // What the headset is really being sent right now, for the menu.
+        internal string ActiveLayerName
+        {
+            get
+            {
+                int a = OriXR_ActiveLayer != null ? OriXR_ActiveLayer() : -1;
+                return a == 1 ? "Steady" : a == 0 ? "Floating Panel" : (active ? (WantSteady ? "Steady" : "Floating Panel") : "not running");
+            }
+        }
 
         // Where the viewer was when the stage was placed, and which way they faced. Eye poses are read relative to this.
         Vector3 viewPoint;
@@ -129,8 +156,9 @@ namespace OriVR
             OriXR_BeginFrame = Fn<BeginFrameFn>(module, "OriXR_BeginFrame");
             OriXR_PopLog = Fn<PopLogFn>(module, "OriXR_PopLog");
             OriXR_Stats = Fn<StatsFn>(module, "OriXR_Stats");
-            var layerFn = GetProcAddress(module, "OriXR_SetLayerMode");
-            if (layerFn != IntPtr.Zero) OriXR_SetLayerMode = Marshal.GetDelegateForFunctionPointer(layerFn, typeof(SetLayerModeFn)) as SetLayerModeFn;
+            OriXR_SetLayerMode = Fn<SetLayerModeFn>(module, "OriXR_SetLayerMode");
+            OriXR_ActiveLayer = Fn<ActiveLayerFn>(module, "OriXR_ActiveLayer");
+            OriXR_RuntimeInfo = Fn<RuntimeInfoFn>(module, "OriXR_RuntimeInfo");
             renderEvent = OriXR_GetRenderEvent();
             nativeLoaded = true;
             return true;
@@ -193,7 +221,24 @@ namespace OriVR
 
         internal void Shot() { wantShot = true; }
 
-        internal void Recenter() { wantRecenter = true; }
+        internal void Recenter() { wantRecenter = true; firstValidView = -1f; }
+
+        void ReadRuntime()
+        {
+            var runtime = new StringBuilder(128);
+            var headset = new StringBuilder(256);
+            OriXR_RuntimeInfo(runtime, runtime.Capacity, headset, headset.Capacity);
+            RuntimeName = runtime.ToString();
+            HeadsetName = headset.ToString();
+            ApplyStage();
+            LogPicture();
+        }
+
+        internal void LogPicture()
+        {
+            string mode = PictureMode == 1 ? "Steady" : PictureMode == 2 ? "Floating Panel" : "Auto";
+            Plugin.Log.LogInfo(string.Format("PICTURE setting {0}, runtime \"{1}\", headset \"{2}\", layer {3}", mode, RuntimeName, HeadsetName, WantSteady ? "Steady (projection)" : "Floating Panel (quad)"));
+        }
 
         internal void Dump(string basePath) { if (nativeLoaded) OriXR_DumpNext(basePath); }
 
@@ -289,8 +334,8 @@ namespace OriVR
         {
             if (!nativeLoaded) return;
             OriXR_SetSharpen(Sharpen);
-            if (OriXR_SetLayerMode != null) OriXR_SetLayerMode(DrawInEyes ? 1 : 0);
-            var c =viewPoint + viewTurn * new Vector3(0f, 0f, -StageDistance);
+            OriXR_SetLayerMode(WantSteady ? 1 : 0);
+            var c = viewPoint + viewTurn * new Vector3(0f, 0f, -StageDistance);
             OriXR_SetStage(c.x, c.y, c.z, StageWidth, StageWidth * EyeHeight / EyeWidth, viewTurn.y, viewTurn.w);
         }
 
@@ -329,6 +374,7 @@ namespace OriVR
                     Plugin.Log.LogInfo("XR native state " + state);
                 }
                 if (state == 3) { End(); yield break; }
+                if (state == 2 && RuntimeName.Length == 0) ReadRuntime();
                 if (state != 2) continue;
 
                 for (int i = 0; i < 2; i++)
@@ -345,9 +391,11 @@ namespace OriVR
                     continue;
                 }
                 MatchTick(info.periodMs);
-                // Place the stage only once the session is FOCUSED (5): before that, Virtual Desktop reports a stand-in
-                // head pose (x 0, z 0, facing 0, 1.1-1.6 m below the real head) marked valid, and the stage landed there.
-                if (info.viewsValid != 0 && wantRecenter && info.sessionState == 5)
+                // Place the stage once the session is FOCUSED (5): before that, Virtual Desktop reports a stand-in head pose
+                // (x 0, z 0, facing 0, 1.1-1.6 m below the real head) marked valid, and the stage landed there. A session that
+                // never gets focus still gets a stage after 20 seconds.
+                if (info.viewsValid != 0 && wantRecenter && firstValidView < 0f) firstValidView = Time.realtimeSinceStartup;
+                if (info.viewsValid != 0 && wantRecenter && (info.sessionState == 5 || Time.realtimeSinceStartup - firstValidView > 20f))
                 {
                     wantRecenter = false;
                     TakeView(info);
