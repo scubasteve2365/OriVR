@@ -24,6 +24,8 @@ To uninstall, run the same bat file and type 2. No game files are changed.
 
 The mod is not signed, so Windows may warn you about the bat file. It is plain text, so you can read it first. Windows Smart App Control can block unsigned mod DLLs. If it is on and the game stays flat, that is the likely cause.
 
+If the game stays flat for another reason, click both sticks to open the menu. It tells you if VR did not start and why. Ori is a 32-bit game, so it has its own OpenXR runtime setting, separate from 64-bit games. If that setting is empty or unusable, the mod uses SteamVR for this game when SteamVR 2.17 or newer is installed. Nothing on your PC is changed.
+
 ## Settings
 
 Click both sticks at once to open the menu in the headset. The game pauses while it is open. Up and down choose a setting, left and right change it, A selects and B closes.
@@ -68,5 +70,7 @@ The output lands in `..\build`.
 ## Credits
 
 Built on [BepInEx](https://github.com/BepInEx/BepInEx) (LGPL-2.1) and the Khronos [OpenXR loader](https://github.com/KhronosGroup/OpenXR-SDK-Source) (Apache-2.0). The sharpening pass follows the idea of AMD FidelityFX Contrast Adaptive Sharpening (MIT). Licences are in the release zip.
+
+The Steady picture mode was contributed by [junglejuz](https://github.com/junglejuz).
 
 OriVR is MIT licensed, by scubasteve2365. This is a fan mod, not made or approved by Moon Studios or Xbox Game Studios. It contains no game files.
