@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace OriVR
 {
-    // Build 11 (release 1.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
+    // Build 12 (release 1.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
     // OpenXR cannot start the game stays flat. Telemetry is stopped, because the lab keeps this game offline.
     [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.0")]
     public class Plugin : BaseUnityPlugin
@@ -70,6 +70,7 @@ namespace OriVR
             menu.Rig = rig;
             menu.RowText = MenuRowText;
             menu.RowTip = MenuRowTip;
+            menu.Problem = () => rig.StartProblem;
             menu.Adjust = MenuAdjust;
             menu.Activate = MenuActivate;
             menu.Closed = () => { rig.ApplyStage(); rig.UpdateResolution(); };
@@ -79,7 +80,7 @@ namespace OriVR
             rig.EyeWidth = eyeWidth.Value;
             rig.EyeHeight = eyeWidth.Value * 9 / 16;
             new Harmony("com.scubasteve2365.orivr").PatchAll(typeof(Plugin).Assembly);
-            Log.LogInfo("OriVR 1.2 (build 11) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
+            Log.LogInfo("OriVR 1.2 (build 12) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
         }
 
         void FixedUpdate() { ticks++; Ticks = ticks; }
@@ -252,6 +253,8 @@ namespace OriVR
                     PushSettings();
                     rig.LogPicture();
                 }
+                else if (line.StartsWith("xrjson ")) rig.TestRuntime(line == "xrjson none" ? "" : line.Substring(7), false);
+                else if (line.StartsWith("xrnofallback ")) rig.TestRuntime(line == "xrnofallback none" ? "" : line.Substring(13), true);
                 else if (line == "picturetest")
                 {
                     foreach (var name in new[] { "SteamVR/OpenXR", "VirtualDesktopXR", "Virtual Desktop", "virtual-desktop", "VisionALVR (VDXR)", "Oculus", "Windows Mixed Reality Runtime", "Pimax", "", null })

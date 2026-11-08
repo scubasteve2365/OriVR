@@ -43,6 +43,8 @@ namespace OriVR
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int PopLogFn(StringBuilder buffer, int size);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void StatsFn(out uint frames, out uint layers, out uint skipped);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetLayerModeFn(int mode);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int LastErrorFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void TestRuntimeFn([MarshalAs(UnmanagedType.LPStr)] string manifest, int noFallback);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ActiveLayerFn();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void RuntimeInfoFn(StringBuilder runtime, int runtimeSize, StringBuilder system, int systemSize);
 
@@ -60,6 +62,8 @@ namespace OriVR
         SetLayerModeFn OriXR_SetLayerMode;
         ActiveLayerFn OriXR_ActiveLayer;
         RuntimeInfoFn OriXR_RuntimeInfo;
+        LastErrorFn OriXR_LastError;
+        TestRuntimeFn OriXR_TestRuntime;
 
         static T Fn<T>(IntPtr module, string name) where T : class
         {
@@ -159,6 +163,8 @@ namespace OriVR
             OriXR_SetLayerMode = Fn<SetLayerModeFn>(module, "OriXR_SetLayerMode");
             OriXR_ActiveLayer = Fn<ActiveLayerFn>(module, "OriXR_ActiveLayer");
             OriXR_RuntimeInfo = Fn<RuntimeInfoFn>(module, "OriXR_RuntimeInfo");
+            OriXR_LastError = Fn<LastErrorFn>(module, "OriXR_LastError");
+            OriXR_TestRuntime = Fn<TestRuntimeFn>(module, "OriXR_TestRuntime");
             renderEvent = OriXR_GetRenderEvent();
             nativeLoaded = true;
             return true;
@@ -166,6 +172,8 @@ namespace OriVR
 
         internal void Begin()
         {
+            StartProblem = null;
+            renderedPairs = 0;
             if (active || !LoadNative()) return;
             var cur = Game.UI.Cameras.Current;
             if (cur == null) { Plugin.Log.LogWarning("vr on: no gameplay camera yet"); return; }
@@ -220,6 +228,19 @@ namespace OriVR
         }
 
         internal void Shot() { wantShot = true; }
+
+        // Set when VR failed to start, so the menu can say why instead of the game just being flat.
+        internal string StartProblem;
+
+        static string DescribeStartFailure(int error)
+        {
+            const string log = " Details are in BepInEx\\LogOutput.log.";
+            if (error == -51)
+                return "The game is flat because no usable 32-bit OpenXR runtime was found (error -51). Update SteamVR, then in SteamVR Settings, under OpenXR, set SteamVR as the OpenXR runtime, and restart the game." + log;
+            return "The game is flat because OpenXR could not start" + (error != 0 ? " (error " + error + ")" : "") + ". Check your headset is on and its VR software is running, then restart the game." + log;
+        }
+
+        internal void TestRuntime(string manifest, bool noFallback) { OriXR_TestRuntime(manifest, noFallback ? 1 : 0); }
 
         internal void Recenter() { wantRecenter = true; firstValidView = -1f; }
 
@@ -373,7 +394,12 @@ namespace OriVR
                     lastState = state;
                     Plugin.Log.LogInfo("XR native state " + state);
                 }
-                if (state == 3) { End(); yield break; }
+                if (state == 3)
+                {
+                    if (renderedPairs == 0) StartProblem = DescribeStartFailure(OriXR_LastError());
+                    End();
+                    yield break;
+                }
                 if (state == 2 && RuntimeName.Length == 0) ReadRuntime();
                 if (state != 2) continue;
 

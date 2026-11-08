@@ -130,7 +130,10 @@ template <class T> static bool GetFn(const char* name, T& out) {
     return true;
 }
 
-#define XRCHECK(call) do { XrResult r_ = (call); if (XR_FAILED(r_)) { Log("%s failed: %d", #call, (int)r_); return false; } } while (0)
+static volatile LONG g_lastXrError = 0;  // the OpenXR error that stopped the start, for the menu
+static volatile LONG g_noFallback = 0;   // lab test only: do not fall back to SteamVR
+
+#define XRCHECK(call) do { XrResult r_ = (call); if (XR_FAILED(r_)) { g_lastXrError = (LONG)r_; Log("%s failed: %d", #call, (int)r_); return false; } } while (0)
 
 static void HereDir(char* path, DWORD size) {
     HMODULE self = nullptr;
@@ -551,6 +554,67 @@ static unsigned short DllMachine(const std::string& path) {
     return machine;
 }
 
+static std::string ReadText(const char* path) {
+    std::string text;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") == 0 && f) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+        fclose(f);
+    }
+    return text;
+}
+
+// A manifest's library_path can be relative to the manifest's own folder.
+static std::string FullLibraryPath(const std::string& manifest, const std::string& lib) {
+    bool relative = !lib.empty() && !(lib.size() > 1 && lib[1] == ':') && lib[0] != '\\' && lib[0] != '/';
+    if (!relative) return lib;
+    size_t slash = manifest.find_last_of("\\/");
+    return (slash == std::string::npos ? std::string() : manifest.substr(0, slash + 1)) + lib;
+}
+
+// The runtime the loader will use: the variable first, then the 32-bit view of HKLM, which is what a 32-bit program reads.
+static std::string ActiveRuntimeManifest() {
+    char value[1024];
+    DWORD n = GetEnvironmentVariableA("XR_RUNTIME_JSON", value, sizeof(value));
+    if (n > 0 && n < sizeof(value)) return value;
+    DWORD size = sizeof(value);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Khronos\\OpenXR\\1", "ActiveRuntime", RRF_RT_REG_SZ, nullptr, value, &size) == ERROR_SUCCESS) return value;
+    return "";
+}
+
+// Empty when the manifest looks loadable by this 32-bit game, otherwise what is wrong with it.
+static std::string RuntimeProblem(const std::string& manifest) {
+    if (manifest.empty()) return "no 32-bit runtime is set";
+    std::string text = ReadText(manifest.c_str());
+    if (text.empty()) return "its manifest file is missing or empty";
+    std::string lib = JsonString(text, "library_path");
+    if (lib.empty()) return "its manifest names no DLL";
+    unsigned short machine = DllMachine(FullLibraryPath(manifest, lib));
+    if (machine == 0) return "its DLL is missing or unreadable";
+    if (machine != 0x14c) return "its DLL is not 32-bit";
+    return "";
+}
+
+// SteamVR's 32-bit runtime, wherever SteamVR is installed. Empty if there is none that looks usable.
+static std::string FindSteamVr32() {
+    const char* file = "\\steamxr_win32.json";
+    char base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
+    if (n > 0 && n < sizeof(base)) {
+        std::string root = JsonString(ReadText((std::string(base) + "\\openvr\\openvrpaths.vrpath").c_str()), "runtime");
+        if (!root.empty() && RuntimeProblem(root + file).empty()) return root + file;
+    }
+    DWORD size = sizeof(base);
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath", RRF_RT_REG_SZ, nullptr, base, &size) == ERROR_SUCCESS) {
+        std::string path = std::string(base) + "\\steamapps\\common\\SteamVR" + file;
+        for (auto& c : path) if (c == '/') c = '\\';
+        if (RuntimeProblem(path).empty()) return path;
+    }
+    return "";
+}
+
 static void CheckLayers(HKEY root, const char* rootName) {
     HKEY key;
     if (RegOpenKeyExA(root, "SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit", 0, KEY_READ, &key) != ERROR_SUCCESS) return;
@@ -561,24 +625,11 @@ static void CheckLayers(HKEY root, const char* rootName) {
         if (r == ERROR_NO_MORE_ITEMS) break;
         if (r != ERROR_SUCCESS) continue;
         if (type == REG_DWORD && data != 0) { Log("OpenXR layer %s (%s): switched off in Windows, skipped", manifest, rootName); continue; }
-        std::string text;
-        FILE* f = nullptr;
-        if (fopen_s(&f, manifest, "rb") == 0 && f) {
-            char buf[4096];
-            size_t n;
-            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-            fclose(f);
-        }
+        std::string text = ReadText(manifest);
         std::string name = JsonString(text, "name");
         std::string lib = JsonString(text, "library_path");
         std::string off = JsonString(text, "disable_environment");
-        std::string full = lib;
-        bool relative = !lib.empty() && !(lib.size() > 1 && lib[1] == ':') && lib[0] != '\\' && lib[0] != '/';
-        if (relative) {
-            std::string dir = manifest;
-            size_t slash = dir.find_last_of("\\/");
-            full = (slash == std::string::npos ? std::string() : dir.substr(0, slash + 1)) + lib;
-        }
+        std::string full = FullLibraryPath(manifest, lib);
         unsigned short machine = full.empty() ? 0 : DllMachine(full);
         const char* kind = machine == 0x14c ? "32-bit" : machine == 0x8664 ? "64-bit" : machine == 0 ? "unreadable" : "other";
         if (machine == 0x14c) {
@@ -597,9 +648,13 @@ static bool StartXr() {
     char path[MAX_PATH];
     HereDir(path, MAX_PATH);
     strcat_s(path, "openxr_loader.dll");
+    g_lastXrError = 0;
     // A 32-bit program reads the 32-bit view of HKLM. HKCU\Software is shared by both.
     CheckLayers(HKEY_LOCAL_MACHINE, "HKLM");
     CheckLayers(HKEY_CURRENT_USER, "HKCU");
+    std::string active = ActiveRuntimeManifest();
+    std::string activeProblem = RuntimeProblem(active);
+    Log("OpenXR 32-bit runtime: %s (%s)", active.empty() ? "none" : active.c_str(), activeProblem.empty() ? "looks usable" : activeProblem.c_str());
     g_loader = LoadLibraryA(path);
     if (!g_loader) { Log("could not load %s, error %lu", path, GetLastError()); return false; }
     g_gipa = (PFN_xrGetInstanceProcAddr)GetProcAddress(g_loader, "xrGetInstanceProcAddr");
@@ -615,7 +670,23 @@ static bool StartXr() {
     ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     ici.enabledExtensionCount = 1;
     ici.enabledExtensionNames = exts;
-    XRCHECK(createInstance(&ici, &g_inst));
+    XrResult created = createInstance(&ici, &g_inst);
+    if (created == XR_ERROR_RUNTIME_UNAVAILABLE) {
+        // A 32-bit game has its own OpenXR runtime setting, separate from 64-bit games, and it can be empty or stale on a
+        // PC where other VR games work. SteamVR ships a 32-bit runtime, so use that for this game only. Nothing in Windows
+        // is changed. A runtime that starts normally is never overridden.
+        std::string steam = g_noFallback ? std::string() : FindSteamVr32();
+        if (steam.empty()) {
+            Log("OpenXR runtime unavailable, and no 32-bit SteamVR runtime was found to use instead");
+        } else if (_stricmp(steam.c_str(), active.c_str()) == 0) {
+            Log("OpenXR runtime unavailable, and it is already SteamVR's: %s", steam.c_str());
+        } else {
+            Log("OpenXR runtime unavailable, using SteamVR for this game only: %s", steam.c_str());
+            SetEnvironmentVariableA("XR_RUNTIME_JSON", steam.c_str());
+            created = createInstance(&ici, &g_inst);
+        }
+    }
+    XRCHECK(created);
 
     PFN_xrGetInstanceProperties props;
     if (GetFn("xrGetInstanceProperties", props)) {
@@ -860,6 +931,12 @@ API void OriXR_SetSharpen(float amount) { g_sharpen = amount; }
 API void OriXR_DumpNext(const char* basePath) { strcpy_s(g_dumpPath, basePath); g_dumpWanted = 1; }
 API int OriXR_RecommendedWidth() { return g_recW; }
 API void OriXR_SetLayerMode(int mode) { g_layerMode = mode ? 1 : 0; }
+API int OriXR_LastError() { return (int)g_lastXrError; }
+// Lab test only: name a runtime manifest ("" removes the override), and allow or block the SteamVR fallback.
+API void OriXR_TestRuntime(const char* manifest, int noFallback) {
+    SetEnvironmentVariableA("XR_RUNTIME_JSON", manifest[0] ? manifest : nullptr);
+    g_noFallback = noFallback;
+}
 API int OriXR_ActiveLayer() { return (int)g_activeLayer; }
 API void OriXR_RuntimeInfo(char* runtime, int runtimeSize, char* system, int systemSize) {
     strncpy_s(runtime, runtimeSize, g_runtimeName, _TRUNCATE);

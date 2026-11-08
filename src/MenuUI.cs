@@ -20,6 +20,7 @@ namespace OriVR
         internal Action<int> Activate;     // row
         internal Func<int, string> RowText;
         internal Func<int, string> RowTip;
+        internal Func<string> Problem;     // why VR did not start, or null
         internal Action Closed;
 
         internal bool IsOpen { get; private set; }
@@ -27,6 +28,7 @@ namespace OriVR
         GameObject root;
         TextBox titleBox, hintBox, tipBox;
         string shownTip;
+        bool shownProblem;
         float nextRefresh;
         Transform bar, line;
         TextBox[] rows = new TextBox[Rows];
@@ -208,9 +210,15 @@ namespace OriVR
                 Show(rows[i], text);
             }
             if (bar != null) bar.localPosition = new Vector3(0f, RowY(selected), 0.25f);
+            var problem = Problem != null ? Problem() : null;
+            if ((problem != null) != shownProblem)
+            {
+                shownProblem = problem != null;
+                Show(titleBox, shownProblem ? "VR DID NOT START" : "VR SETTINGS");
+            }
             if (RowTip != null)
             {
-                var tip = RowTip(selected);
+                var tip = problem ?? RowTip(selected);
                 if (tip != shownTip)
                 {
                     shownTip = tip;

@@ -31,7 +31,7 @@ Uninstall
 Double click "Install OriVR.bat" and type 2. No game files are changed by this mod.
 
 If something goes wrong
-- The game stays flat: check your OpenXR runtime is set (SteamVR or VDXR). Then look in BepInEx\LogOutput.log in the game folder. Lines starting "OpenXR layer" list the OpenXR add-ons this game sees.
+- The game stays flat: click both sticks to open the menu. If VR did not start, the menu says why. This game is 32-bit, so it has its own OpenXR runtime setting, separate from 64-bit games. If that setting is empty or broken, the mod uses SteamVR for this game when SteamVR is installed. Check your OpenXR runtime is set (SteamVR or VDXR). Then look in BepInEx\LogOutput.log in the game folder. Lines starting "OpenXR layer" list the OpenXR add-ons this game sees.
 - Windows warns about the bat file: this mod is not signed, so Windows may ask you to confirm. Read the bat file first if you like. It is plain text.
 - Smart App Control: if it is on, Windows can block unsigned mod DLLs and the game runs flat. Windows does not make this easy to turn back on, so decide for yourself. There is no workaround in the mod.
 - When SteamVR starts, its dashboard may appear in front of the stage. Close it as usual.
