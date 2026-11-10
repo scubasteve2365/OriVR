@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace OriVR
 {
-    // Build 12 (release 1.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
+    // Build 13 (after release 1.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
     // OpenXR cannot start the game stays flat. Telemetry is stopped, because the lab keeps this game offline.
     [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.0")]
     public class Plugin : BaseUnityPlugin
@@ -80,7 +80,7 @@ namespace OriVR
             rig.EyeWidth = eyeWidth.Value;
             rig.EyeHeight = eyeWidth.Value * 9 / 16;
             new Harmony("com.scubasteve2365.orivr").PatchAll(typeof(Plugin).Assembly);
-            Log.LogInfo("OriVR 1.2 (build 12) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
+            Log.LogInfo("OriVR 1.2 (build 13) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
         }
 
         void FixedUpdate() { ticks++; Ticks = ticks; }
@@ -266,6 +266,8 @@ namespace OriVR
                     var parts = line.Split(' ');
                     speed.SetRate(int.Parse(parts[1]), parts.Length > 2 ? int.Parse(parts[2]) : 0);
                 }
+                else if (line == "gamesync 0" || line == "gamesync 1") { SyncFramesTest.EnabledForceFixedUpdate = line == "gamesync 1"; Log.LogInfo("game frame sync nudging " + (SyncFramesTest.EnabledForceFixedUpdate ? "allowed" : "blocked")); }
+                else if (line == "vsync 0" || line == "vsync 1") QualitySettings.vSyncCount = line == "vsync 1" ? 1 : 0;
                 else if (line.StartsWith("speed ")) speed.Run(float.Parse(line.Substring(6), System.Globalization.CultureInfo.InvariantCulture));
                 else if (line == "force 0" || line == "force 1") rig.ForceRender = line == "force 1";
                 else if (line == "flip 0" || line == "flip 1") rig.FlipY = line == "flip 1";

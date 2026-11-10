@@ -376,6 +376,11 @@ namespace OriVR
             var wait = new WaitForEndOfFrame();
             float nextStat = Time.realtimeSinceStartup + 5f;
             int ticksAtStat = Plugin.Ticks, framesAtStat = Time.frameCount;
+            float gameAtStat = Time.time;
+            int loggedVsync = 0, loggedTarget = -1;
+            bool speedWarned = false;
+            int fastFrames = 0, slowFrames = 0, statFrames = 0;  // frames where the game's own frame sync sped time up or slowed it
+            float tickAtStat = -1f;  // -1: the first window after VR starts, when the tick is still being matched
             while (active)
             {
                 yield return wait;
@@ -431,17 +436,50 @@ namespace OriVR
                 else ShowFlat();
                 GL.IssuePluginEvent(renderEvent, EventSubmit);
 
+                // The game's own settings menu can turn VSync or a frame cap back on while VR runs. Then the game waits for
+                // the desktop monitor and misses headset frames. Log it whenever it changes.
+                if (QualitySettings.vSyncCount != loggedVsync || Application.targetFrameRate != loggedTarget)
+                {
+                    loggedVsync = QualitySettings.vSyncCount;
+                    loggedTarget = Application.targetFrameRate;
+                    Plugin.Log.LogInfo(string.Format("GAMESET during VR: VSync {0}, frame cap {1}{2}", loggedVsync, loggedTarget,
+                        loggedVsync != 0 || loggedTarget > 0 ? ". The game now waits for the desktop monitor or its cap, so headset frames can be missed" : ""));
+                }
+
+                statFrames++;
+                if (Time.timeScale > 1.01f) fastFrames++;
+                else if (Time.timeScale > 0f && Time.timeScale < 0.99f) slowFrames++;
+
                 float now = Time.realtimeSinceStartup;
                 if (now >= nextStat)
                 {
                     uint frames, layers, skipped;
                     OriXR_Stats(out frames, out layers, out skipped);
                     float span = now - (nextStat - 5f);
-                    Plugin.Log.LogInfo(string.Format("XRSTAT state {0} shouldRender {1} period {2:F2} ms, unity {3:F1} fps, ticks {4:F1}/s, submitted {5}, with images {6}, skipped {7}, pairs {8}",
-                        info.sessionState, info.shouldRender, info.periodMs, (Time.frameCount - framesAtStat) / span, (Plugin.Ticks - ticksAtStat) / span, frames, layers, skipped, renderedPairs + " eye " + EyeWidth));
+                    float fps = (Time.frameCount - framesAtStat) / span;
+                    float gameSpeed = (Time.time - gameAtStat) / span;  // game seconds per real second, 1.000 is normal speed
+                    float headsetHz = info.periodMs > 0f ? 1000f / info.periodMs : 0f;
+                    Plugin.Log.LogInfo(string.Format("XRSTAT state {0} shouldRender {1} period {2:F2} ms, unity {3:F1} fps, ticks {4:F1}/s, submitted {5}, with images {6}, skipped {7}, pairs {8}, game speed {9:F3}, tick {10:F2} ms, timeScale {11:F2}, game sync {12} (fast {13:F0}% slow {14:F0}% of frames), max step {15:F2} ms",
+                        info.sessionState, info.shouldRender, info.periodMs, fps, (Plugin.Ticks - ticksAtStat) / span, frames, layers, skipped, renderedPairs + " eye " + EyeWidth,
+                        gameSpeed, Time.fixedDeltaTime * 1000f, Time.timeScale,
+                        PhysicsLimitTest.IsSynced && SyncFramesTest.EnabledForceFixedUpdate ? "on" : "off",
+                        statFrames > 0 ? 100f * fastFrames / statFrames : 0f, statFrames > 0 ? 100f * slowFrames / statFrames : 0f, Time.maximumDeltaTime * 1000f));
+                    int fastShare = statFrames > 0 ? 100 * fastFrames / statFrames : 0, slowShare = statFrames > 0 ? 100 * slowFrames / statFrames : 0;
+                    fastFrames = slowFrames = statFrames = 0;
+                    // Normal speed needs the frames the headset asks for. Paused (menu) or the game's own slow motion is not a fault.
+                    // A window in which the tick length changed (VR start, a new headset rate) is not judged.
+                    bool settled = tickAtStat == Time.fixedDeltaTime;
+                    bool off = settled && Time.timeScale != 0f && Mathf.Abs(gameSpeed - 1f) > 0.05f;
+                    if (off && !speedWarned)
+                        Plugin.Log.LogWarning(string.Format("SPEED the game ran at {0:F2} of normal speed. Headset {1:F1} Hz, frames {2:F1} a second, the game's own frame sync sped time up on {3}% and slowed it on {4}% of frames.{5}",
+                            gameSpeed, headsetHz, fps, fastShare, slowShare,
+                            fps < headsetHz * 0.95f ? " Frames are arriving slower than the headset asks, and each missed frame slows the game." : ""));
+                    speedWarned = off;
                     nextStat = now + 5f;
                     ticksAtStat = Plugin.Ticks;
                     framesAtStat = Time.frameCount;
+                    gameAtStat = Time.time;
+                    tickAtStat = Time.fixedDeltaTime;
                 }
             }
         }
