@@ -7,9 +7,9 @@ using UnityEngine;
 
 namespace OriVR
 {
-    // Build 13 (after release 1.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
+    // Build 14 (release 1.2.1): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
     // OpenXR cannot start the game stays flat. Telemetry is stopped, because the lab keeps this game offline.
-    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.0")]
+    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log;
@@ -31,7 +31,7 @@ namespace OriVR
         LabTools lab;
         const float DefaultWidth = 1.85f, DefaultDistance = 1.0f, DefaultDepth = 1.5f, DefaultSharpen = 0.3f;
         ConfigEntry<bool> matchRefresh;
-        ConfigEntry<string> picture;
+        ConfigEntry<string> picture, surround;
         MenuUI menu;
         int ticks;
         int nextCommandCheck;
@@ -66,6 +66,8 @@ namespace OriVR
             rig.MatchRefresh = matchRefresh.Value;
             picture = Config.Bind("VR", "Picture", "Auto", "How the stage reaches the headset: Auto, Steady or Panel. Auto uses Steady on Virtual Desktop and Panel on everything else.");
             rig.PictureMode = PictureCode(picture.Value);
+            surround = Config.Bind("VR", "Surround", "Black", "What you see around the stage: Black, Green (for Virtual Desktop's chroma-key passthrough) or Transparent (asks the headset software to show your room, where it offers that).");
+            rig.Surround = SurroundCode(surround.Value);
             menu = gameObject.AddComponent<MenuUI>();
             menu.Rig = rig;
             menu.RowText = MenuRowText;
@@ -80,7 +82,7 @@ namespace OriVR
             rig.EyeWidth = eyeWidth.Value;
             rig.EyeHeight = eyeWidth.Value * 9 / 16;
             new Harmony("com.scubasteve2365.orivr").PatchAll(typeof(Plugin).Assembly);
-            Log.LogInfo("OriVR 1.2 (build 13) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
+            Log.LogInfo("OriVR 1.2.1 (build 14) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
         }
 
         void FixedUpdate() { ticks++; Ticks = ticks; }
@@ -119,8 +121,9 @@ namespace OriVR
                          + "Steady draws the stage into each eye's view and stays still. "
                          + "Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head."
                          + (rig.RuntimeName.Length > 0 ? " Detected: " + rig.RuntimeName + "." : "");
-                case 7: return "Puts the stage straight in front of where you are looking now.";
-                case 8: return "Puts every setting on this page back to how it started.";
+                case 7: return SurroundTip();
+                case 8: return "Puts the stage straight in front of where you are looking now.";
+                case 9: return "Puts every setting on this page back to how it started.";
                 default: return "Closes this menu and goes back to the game.";
             }
         }
@@ -141,6 +144,34 @@ namespace OriVR
             picture.Value = order[(i + dir + order.Length) % order.Length];
         }
 
+        string SurroundText()
+        {
+            if (surround.Value == "Green") return "Surround: Green";
+            if (surround.Value == "Transparent")
+                return rig.SeeThroughKnown && !rig.CanSeeThrough ? "Surround: Transparent (not offered, black)" : "Surround: Transparent";
+            return "Surround: Black";
+        }
+
+        string SurroundTip()
+        {
+            if (surround.Value == "Green")
+                return "Green fills everything around the stage with pure green. In Virtual Desktop, turn on passthrough with the chroma key set to green, and your room shows around the game.";
+            if (surround.Value == "Transparent")
+                return rig.SeeThroughKnown && !rig.CanSeeThrough
+                    ? "Transparent: your headset software does not offer see-through for games, so the surround stays black. Try Green with Virtual Desktop's chroma key instead."
+                    : "Transparent asks your headset software to show your room around the game itself. Not every headset software offers it.";
+            return "What you see around the stage. Black is the original look. Green is for Virtual Desktop's chroma-key passthrough. Transparent asks your headset software to show your room.";
+        }
+
+        void CycleSurround(int dir)
+        {
+            var order = new[] { "Black", "Green", "Transparent" };
+            int i = Math.Max(0, Array.IndexOf(order, surround.Value));
+            surround.Value = order[(i + dir + order.Length) % order.Length];
+        }
+
+        static int SurroundCode(string value) { return value == "Green" ? 1 : value == "Transparent" ? 2 : 0; }
+
         static int PictureCode(string value) { return value == "Steady" ? 1 : value == "Panel" ? 2 : 0; }
 
         string MenuRowText(int row)
@@ -154,8 +185,9 @@ namespace OriVR
                 case 4: return string.Format("Sharpen: {0:F0}%", sharpen.Value * 100f);
                 case 5: return string.Format("Resolution: {0:F0}%   ({1} pixels wide)", sharpness.Value * 100f, rig.WantedWidth());
                 case 6: return PictureText();
-                case 7: return "Recenter";
-                case 8: return "Reset to defaults";
+                case 7: return SurroundText();
+                case 8: return "Recenter";
+                case 9: return "Reset to defaults";
                 default: return "Close";
             }
         }
@@ -169,25 +201,26 @@ namespace OriVR
             else if (row == 4) sharpen.Value = Mathf.Clamp(sharpen.Value + dir * 0.1f, 0f, 1f);
             else if (row == 5) sharpness.Value = Mathf.Clamp(sharpness.Value + dir * 0.1f, 0.5f, 1.5f);
             else if (row == 6) CyclePicture(dir);
+            else if (row == 7) CycleSurround(dir);
             else return;
             PushSettings();
-            Log.LogInfo(string.Format("MENU stage {0:F2} m wide at {1:F2} m, depth {2:F2}, pop-out {3:F2}, sharpen {4:F2}, resolution {5:F2}, picture {6}", stageWidth.Value, stageDistance.Value, separation.Value, popOut.Value, sharpen.Value, sharpness.Value, picture.Value));
+            Log.LogInfo(string.Format("MENU stage {0:F2} m wide at {1:F2} m, depth {2:F2}, pop-out {3:F2}, sharpen {4:F2}, resolution {5:F2}, picture {6}, surround {7}", stageWidth.Value, stageDistance.Value, separation.Value, popOut.Value, sharpen.Value, sharpness.Value, picture.Value, surround.Value));
             if (row == 6) rig.LogPicture();
         }
 
         void MenuActivate(int row)
         {
-            if (row == 6)
+            if (row == 6 || row == 7)
             {
-                MenuAdjust(6, 1);
+                MenuAdjust(row, 1);
                 menu.Refresh();
             }
-            else if (row == 7)
+            else if (row == 8)
             {
                 rig.Recenter();
                 Log.LogInfo("MENU recenter");
             }
-            else if (row == 8)
+            else if (row == 9)
             {
                 stageDistance.Value = DefaultDistance;
                 stageWidth.Value = DefaultWidth;
@@ -196,11 +229,12 @@ namespace OriVR
                 sharpen.Value = DefaultSharpen;
                 sharpness.Value = 1f;
                 picture.Value = "Auto";
+                surround.Value = "Black";
                 PushSettings();
                 menu.Refresh();
                 Log.LogInfo("MENU defaults");
             }
-            else if (row == 9) menu.Close();
+            else if (row == 10) menu.Close();
         }
 
         void PushSettings()
@@ -212,6 +246,7 @@ namespace OriVR
             rig.PopOut = popOut.Value;
             rig.Sharpen = sharpen.Value;
             rig.PictureMode = PictureCode(picture.Value);
+            rig.Surround = SurroundCode(surround.Value);
             rig.ApplyStage();
         }
 
@@ -247,6 +282,11 @@ namespace OriVR
                 else if (line.StartsWith("scenes ")) lab.ListScenes(line.Substring(7));
                 else if (line.StartsWith("goto ")) lab.GoTo(line.Substring(5));
                 else if (line.StartsWith("crossfade ")) lab.CrossFade(float.Parse(line.Substring(10), System.Globalization.CultureInfo.InvariantCulture));
+                else if (line == "surround black" || line == "surround green" || line == "surround transparent")
+                {
+                    surround.Value = line == "surround green" ? "Green" : line == "surround transparent" ? "Transparent" : "Black";
+                    PushSettings();
+                }
                 else if (line == "picture auto" || line == "picture steady" || line == "picture panel")
                 {
                     picture.Value = line == "picture steady" ? "Steady" : line == "picture panel" ? "Panel" : "Auto";

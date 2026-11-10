@@ -63,6 +63,8 @@ namespace OriVR
         ActiveLayerFn OriXR_ActiveLayer;
         RuntimeInfoFn OriXR_RuntimeInfo;
         LastErrorFn OriXR_LastError;
+        SetLayerModeFn OriXR_SetSurround;
+        ActiveLayerFn OriXR_CanSeeThrough;
         TestRuntimeFn OriXR_TestRuntime;
 
         static T Fn<T>(IntPtr module, string name) where T : class
@@ -84,6 +86,13 @@ namespace OriVR
         // Panel hands it to the runtime as one quad layer per eye, which Virtual Desktop squashes and shears when the head
         // moves. Auto chooses by OpenXR runtime.
         internal int PictureMode;  // 0 Auto, 1 Steady, 2 Floating Panel
+        internal int Surround;     // 0 Black, 1 Green (chroma-key passthrough), 2 Transparent (runtime see-through)
+        // Known once OpenXR has started: whether the runtime offers a see-through blend mode for Transparent.
+        internal bool SeeThroughKnown { get { return RuntimeName.Length > 0; } }
+        internal bool CanSeeThrough { get { return OriXR_CanSeeThrough != null && OriXR_CanSeeThrough() != 0; } }
+        // Lab only: SpeedTest's frame cap test sets this so the VSync guard leaves its cap alone.
+        internal static bool AllowFrameCap;
+        bool savedForceFixed = true;
         internal string RuntimeName = "", HeadsetName = "";
         float firstValidView = -1f;
 
@@ -164,6 +173,8 @@ namespace OriVR
             OriXR_ActiveLayer = Fn<ActiveLayerFn>(module, "OriXR_ActiveLayer");
             OriXR_RuntimeInfo = Fn<RuntimeInfoFn>(module, "OriXR_RuntimeInfo");
             OriXR_LastError = Fn<LastErrorFn>(module, "OriXR_LastError");
+            OriXR_SetSurround = Fn<SetLayerModeFn>(module, "OriXR_SetSurround");
+            OriXR_CanSeeThrough = Fn<ActiveLayerFn>(module, "OriXR_CanSeeThrough");
             OriXR_TestRuntime = Fn<TestRuntimeFn>(module, "OriXR_TestRuntime");
             renderEvent = OriXR_GetRenderEvent();
             nativeLoaded = true;
@@ -201,6 +212,11 @@ namespace OriVR
             savedVsync = QualitySettings.vSyncCount;
             Application.targetFrameRate = -1;
             QualitySettings.vSyncCount = 0;  // xrWaitFrame paces the game now
+            // The game's own frame sync (SyncFramesTest) nudges timeScale to 1.5 or 0.5 with thresholds made for a 60 Hz
+            // tick. With VR's shorter ticks it made the game run 1.2 to 1.4 times too fast on RigB. The headset paces the
+            // game now, so it stays off while VR runs.
+            savedForceFixed = SyncFramesTest.EnabledForceFixedUpdate;
+            SyncFramesTest.EnabledForceFixedUpdate = false;
 
             ApplyStage();
             OriXR_Start(eyeOut[0].GetNativeTexturePtr(), eyeOut[1].GetNativeTexturePtr(), EyeWidth, EyeHeight);
@@ -223,6 +239,8 @@ namespace OriVR
             }
             Application.targetFrameRate = savedTargetFps;
             QualitySettings.vSyncCount = savedVsync;
+            SyncFramesTest.EnabledForceFixedUpdate = savedForceFixed;
+            Time.timeScale = Time.timeScale > 0f ? 1f : 0f;
             GL.IssuePluginEvent(renderEvent, EventShutdown);
             Plugin.Log.LogInfo("VR stopped after " + renderedPairs + " eye pairs");
         }
@@ -316,11 +334,23 @@ namespace OriVR
             Plugin.Log.LogInfo(string.Format("RESOLUTION eye {0}x{1}, stage {2:F2} m at {3:F2} m, sharpness {4:F2}", width, height, StageWidth, StageDistance, Sharpness));
         }
 
+        bool loggedStepRestore;
+
         void MatchTick(float periodMs)
         {
             if (!MatchRefresh || periodMs <= 0f) return;
             float period = periodMs / 1000f;
-            if (Mathf.Abs(Time.fixedDeltaTime - period) < 0.00002f) return;
+            if (Mathf.Abs(Time.fixedDeltaTime - period) < 0.00002f)
+            {
+                // The game's PhysicsLimitTest sets its own step limit (1/60 or 1/30) now and then. Keep one tick per frame.
+                if (Mathf.Abs(Time.maximumDeltaTime - period) > 0.00002f)
+                {
+                    if (!loggedStepRestore) Plugin.Log.LogInfo(string.Format("STEP the game set its step limit to {0:F2} ms, set back to {1:F2} ms (logged once)", Time.maximumDeltaTime * 1000f, periodMs));
+                    loggedStepRestore = true;
+                    Time.maximumDeltaTime = period;
+                }
+                return;
+            }
             if (savedFixed < 0f)
             {
                 savedFixed = Time.fixedDeltaTime;
@@ -356,6 +386,7 @@ namespace OriVR
             if (!nativeLoaded) return;
             OriXR_SetSharpen(Sharpen);
             OriXR_SetLayerMode(WantSteady ? 1 : 0);
+            OriXR_SetSurround(Surround);
             var c = viewPoint + viewTurn * new Vector3(0f, 0f, -StageDistance);
             OriXR_SetStage(c.x, c.y, c.z, StageWidth, StageWidth * EyeHeight / EyeWidth, viewTurn.y, viewTurn.w);
         }
@@ -438,6 +469,12 @@ namespace OriVR
 
                 // The game's own settings menu can turn VSync or a frame cap back on while VR runs. Then the game waits for
                 // the desktop monitor and misses headset frames. Log it whenever it changes.
+                // The game's VSync menu writes QualitySettings directly, and its Reset to defaults turns VSync on. Either would
+                // make the game wait for the desktop monitor and miss headset frames, so the mod turns them back off.
+                bool guarded = false;
+                if (QualitySettings.vSyncCount != 0) { QualitySettings.vSyncCount = 0; guarded = true; }
+                if (Application.targetFrameRate > 0 && !AllowFrameCap) { Application.targetFrameRate = -1; guarded = true; }
+                if (guarded) Plugin.Log.LogInfo("GAMESET the game turned VSync or a frame cap on during VR. Turned off again: the headset paces the game");
                 if (QualitySettings.vSyncCount != loggedVsync || Application.targetFrameRate != loggedTarget)
                 {
                     loggedVsync = QualitySettings.vSyncCount;

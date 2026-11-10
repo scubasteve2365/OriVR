@@ -25,6 +25,7 @@ Up and down choose a setting. Left and right change it. A selects. B closes.
 - Sharpen: crisper edges. Too high looks harsh.
 - Resolution: 100% matches your headset. Higher costs speed and adds little in this game.
 - Picture: Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head.
+- Surround: what you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black.
 - Recenter: puts the stage in front of you again.
 
 Uninstall
@@ -51,5 +52,5 @@ Notes
 - The mod stops the game's telemetry.
 - Settings are saved in BepInEx\config\com.scubasteve2365.orivr.cfg in the game folder.
 
-Version 1.2. Credits and licences are in THIRD-PARTY-NOTICES.txt. OriVR is MIT licensed, by scubasteve2365.
+Version 1.2.1. Credits and licences are in THIRD-PARTY-NOTICES.txt. OriVR is MIT licensed, by scubasteve2365.
 This is a fan mod, not made or approved by Moon Studios or Xbox Game Studios.

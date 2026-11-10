@@ -12,6 +12,7 @@ namespace OriVR
         {
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = fps;
+            XrRig.AllowFrameCap = fps > 0;
             if (fixedHz > 0)
             {
                 Time.fixedDeltaTime = 1f / fixedHz;

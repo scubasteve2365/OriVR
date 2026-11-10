@@ -108,6 +108,12 @@ static unsigned long long g_submitted, g_submittedLayers, g_skippedAcquire;
 struct Swap { XrSwapchain handle; std::vector<XrSwapchainImageD3D11KHR> images; };
 static Swap g_swap[2];
 static Swap g_proj[2];
+// Surround: what the player sees around the stage. Ported from CupheadVR 1.03 (same author).
+static Swap g_backdrop;                      // 16x16 image in the surround colour, a projection layer behind the panels (Green only)
+static volatile LONG g_surround = 0;         // 0 black, 1 green (Virtual Desktop chroma-key passthrough), 2 transparent (runtime alpha blend)
+static bool g_canAlphaBlend;                 // the runtime offers XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+static bool g_canAdditive;                   // the runtime offers XR_ENVIRONMENT_BLEND_MODE_ADDITIVE
+static LONG g_loggedSurround = -1;
 static std::vector<ID3D11RenderTargetView*> g_projRtv[2];
 static int g_projW, g_projH;
 
@@ -396,6 +402,32 @@ static bool CreateProjectionSwapchains() {
     return true;
 }
 
+static bool SeeThrough() { return g_surround == 2 && (g_canAlphaBlend || g_canAdditive); }
+static void SurroundColour(float out[4]) {
+    out[0] = 0; out[1] = g_surround == 1 ? 1.0f : 0; out[2] = 0; out[3] = SeeThrough() ? 0 : 1.0f;
+}
+
+// The 16x16 backdrop, made on first use. It is cleared every frame, so a change of Surround shows at once.
+static bool EnsureBackdrop() {
+    if (g_backdrop.handle) return true;
+    XrSwapchainCreateInfo c{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    c.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    c.format = g_format;
+    c.sampleCount = 1;
+    c.width = c.height = 16;
+    c.faceCount = c.arraySize = c.mipCount = 1;
+    uint32_t ic = 0;
+    if (XR_SUCCEEDED(p_createSwap(g_sess, &c, &g_backdrop.handle)) && XR_SUCCEEDED(p_enumImages(g_backdrop.handle, 0, &ic, nullptr))) {
+        g_backdrop.images.assign(ic, XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+        p_enumImages(g_backdrop.handle, ic, &ic, (XrSwapchainImageBaseHeader*)g_backdrop.images.data());
+        Log("surround backdrop ready, %u images", ic);
+        return true;
+    }
+    Log("no surround backdrop: Green around the panels is not available");
+    g_backdrop.handle = XR_NULL_HANDLE;
+    return false;
+}
+
 static bool EnsureProjection() {
     if (g_projState == 0) {
         g_projState = (CreateStagePass() && CreateProjectionSwapchains()) ? 1 : -1;
@@ -468,8 +500,11 @@ static bool DrawEye(int e, ID3D11Texture2D* src, const PendingFrame& f, XrCompos
         ID3DDeviceContextState* unityState = nullptr;
         g_ctx1->SwapDeviceContextState(g_passState, &unityState);
         // Every piece of state is set here: the private state keeps whatever the last pass left in it.
-        const float black[4] = {0, 0, 0, 1};
-        g_ctx->ClearRenderTargetView(rtv, black);
+        // The view outside the stage takes the Surround colour. The stage itself is drawn opaque with a hard edge (no
+        // blending), so no pixel at its border mixes with green.
+        float surround[4];
+        SurroundColour(surround);
+        g_ctx->ClearRenderTargetView(rtv, surround);
         g_ctx->UpdateSubresource(g_stageCb, 0, nullptr, corners, 0, 0);
         D3D11_VIEWPORT vp{0, 0, (float)g_projW, (float)g_projH, 0, 1};
         g_ctx->RSSetViewports(1, &vp);
@@ -660,6 +695,25 @@ static bool StartXr() {
     g_gipa = (PFN_xrGetInstanceProcAddr)GetProcAddress(g_loader, "xrGetInstanceProcAddr");
     if (!g_gipa) { Log("loader has no xrGetInstanceProcAddr"); return false; }
 
+    // Everything the runtime offers, for reports from headsets the lab does not have.
+    PFN_xrEnumerateInstanceExtensionProperties enumExt = nullptr;
+    if (XR_SUCCEEDED(g_gipa(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", (PFN_xrVoidFunction*)&enumExt)) && enumExt) {
+        uint32_t n = 0;
+        if (XR_SUCCEEDED(enumExt(nullptr, 0, &n, nullptr)) && n) {
+            std::vector<XrExtensionProperties> props(n, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+            if (XR_SUCCEEDED(enumExt(nullptr, n, &n, props.data()))) {
+                std::string line;
+                for (uint32_t i = 0; i < n; i++) {
+                    if (line.size() + strlen(props[i].extensionName) > 400) { Log("extensions: %s", line.c_str()); line.clear(); }
+                    line += props[i].extensionName;
+                    line += ' ';
+                }
+                if (!line.empty()) Log("extensions: %s", line.c_str());
+                Log("extensions offered: %u", n);
+            }
+        }
+    }
+
     PFN_xrCreateInstance createInstance;
     if (!GetFn("xrCreateInstance", createInstance)) return false;
     const char* exts[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
@@ -702,6 +756,24 @@ static bool StartXr() {
     XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO};
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XRCHECK(getSystem(g_inst, &sgi, &g_sys));
+
+    g_canAlphaBlend = g_canAdditive = false;
+    PFN_xrEnumerateEnvironmentBlendModes enumBlend;
+    if (GetFn("xrEnumerateEnvironmentBlendModes", enumBlend)) {
+        XrEnvironmentBlendMode modes[8];
+        uint32_t n = 0;
+        if (XR_SUCCEEDED(enumBlend(g_inst, g_sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 8, &n, modes))) {
+            std::string list;
+            for (uint32_t i = 0; i < n; i++) {
+                list += modes[i] == XR_ENVIRONMENT_BLEND_MODE_OPAQUE ? "opaque " : modes[i] == XR_ENVIRONMENT_BLEND_MODE_ADDITIVE ? "additive " :
+                        modes[i] == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND ? "alpha_blend " : "other ";
+                if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) g_canAlphaBlend = true;
+                if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_ADDITIVE) g_canAdditive = true;
+            }
+            Log("see-through modes: %s(Transparent surround %s)", list.c_str(),
+                g_canAlphaBlend ? "uses alpha blend" : g_canAdditive ? "uses additive" : "not offered, black used");
+        }
+    }
 
     PFN_xrGetSystemProperties sysProps;
     if (GetFn("xrGetSystemProperties", sysProps)) {
@@ -844,7 +916,9 @@ static void DoSubmit() {
     XrCompositionLayerQuad quads[2];
     XrCompositionLayerProjectionView views[2];
     XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-    const XrCompositionLayerBaseHeader* layers[2];
+    const XrCompositionLayerBaseHeader* layers[3];
+    XrCompositionLayerProjection backdrop{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    XrCompositionLayerProjectionView bviews[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     uint32_t count = 0;
     LONG mode = (g_layerMode && f.viewsValid && EnsureProjection()) ? 1 : 0;
     if (f.shouldRender) g_activeLayer = mode;
@@ -858,23 +932,62 @@ static void DoSubmit() {
             proj.space = g_space;
             proj.viewCount = 2;
             proj.views = views;
+            if (SeeThrough()) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
             layers[0] = (XrCompositionLayerBaseHeader*)&proj;
             count = 1;
         } else {
             g_skippedAcquire++;
         }
     } else if (f.shouldRender) {
+        // Black keeps the original behaviour (nothing behind the panels). Green puts a green projection layer behind them.
+        bool haveBackdrop = false;
+        if (g_surround == 1 && f.viewsValid && EnsureBackdrop()) {
+            uint32_t idx = 0;
+            if (XR_SUCCEEDED(p_acquire(g_backdrop.handle, nullptr, &idx))) {
+                XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+                wi.timeout = 100000000;
+                p_waitImage(g_backdrop.handle, &wi);
+                D3D11_RENDER_TARGET_VIEW_DESC rv{};
+                rv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                ID3D11RenderTargetView* brtv = nullptr;
+                if (SUCCEEDED(g_dev->CreateRenderTargetView(g_backdrop.images[idx].texture, &rv, &brtv))) {
+                    float colour[4];
+                    SurroundColour(colour);
+                    g_ctx->ClearRenderTargetView(brtv, colour);
+                    brtv->Release();
+                }
+                p_release(g_backdrop.handle, nullptr);
+                for (int e = 0; e < 2; e++) {
+                    bviews[e].pose = f.pose[e];
+                    bviews[e].fov = f.fov[e];
+                    bviews[e].subImage.swapchain = g_backdrop.handle;
+                    bviews[e].subImage.imageRect.extent = {16, 16};
+                }
+                backdrop.space = g_space;
+                backdrop.viewCount = 2;
+                backdrop.views = bviews;
+                haveBackdrop = true;
+            }
+        }
         if (CopyEye(0, f.src[0], quads[0]) && CopyEye(1, f.src[1], quads[1])) {
-            layers[0] = (XrCompositionLayerBaseHeader*)&quads[0];
-            layers[1] = (XrCompositionLayerBaseHeader*)&quads[1];
-            count = 2;
+            if (haveBackdrop) layers[count++] = (XrCompositionLayerBaseHeader*)&backdrop;
+            layers[count++] = (XrCompositionLayerBaseHeader*)&quads[0];
+            layers[count++] = (XrCompositionLayerBaseHeader*)&quads[1];
         } else {
             g_skippedAcquire++;
         }
     }
     XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
     fei.displayTime = f.displayTime;
-    fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    fei.environmentBlendMode = !SeeThrough() ? XR_ENVIRONMENT_BLEND_MODE_OPAQUE
+        : g_canAlphaBlend ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND : XR_ENVIRONMENT_BLEND_MODE_ADDITIVE;
+    if (f.shouldRender && g_surround != g_loggedSurround) {
+        g_loggedSurround = g_surround;
+        Log("SURROUND %s%s", g_surround == 1 ? "green" : g_surround == 2 ? "transparent" : "black",
+            g_surround == 2 && !SeeThrough() ? " asked, but the runtime offers no see-through blend mode: black used"
+            : !SeeThrough() ? "" : g_canAlphaBlend ? " (alpha blend)" : " (additive)");
+    }
     fei.layerCount = count;
     fei.layers = layers;
     r = p_endFrame(g_sess, &fei);
@@ -899,6 +1012,9 @@ static void DoShutdown() {
     }
     g_projW = 0;
     g_projState = 0;
+    g_backdrop.handle = XR_NULL_HANDLE;
+    g_backdrop.images.clear();
+    g_loggedSurround = -1;
     g_activeLayer = -1;
     g_loggedMode = -1;
     g_inst = XR_NULL_HANDLE;
@@ -931,6 +1047,8 @@ API void OriXR_SetSharpen(float amount) { g_sharpen = amount; }
 API void OriXR_DumpNext(const char* basePath) { strcpy_s(g_dumpPath, basePath); g_dumpWanted = 1; }
 API int OriXR_RecommendedWidth() { return g_recW; }
 API void OriXR_SetLayerMode(int mode) { g_layerMode = mode ? 1 : 0; }
+API void OriXR_SetSurround(int mode) { g_surround = mode; }
+API int OriXR_CanSeeThrough() { return (g_canAlphaBlend || g_canAdditive) ? 1 : 0; }
 API int OriXR_LastError() { return (int)g_lastXrError; }
 // Lab test only: name a runtime manifest ("" removes the override), and allow or block the SteamVR fallback.
 API void OriXR_TestRuntime(const char* manifest, int noFallback) {
