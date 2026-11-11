@@ -204,6 +204,7 @@ namespace OriVR
 
         internal void Begin()
         {
+            ResetPacing();
             StartProblem = null;
             renderedPairs = 0;
             if (active || !LoadNative()) return;
@@ -370,10 +371,72 @@ namespace OriVR
         internal float HeadsetHz;  // last rate OpenXR reported, for the menu readout
         internal int RecommendedWidth { get { return OriXR_RecommendedWidth != null ? OriXR_RecommendedWidth() : 0; } }
 
+        // Real frame pacing. A Steam Frame kept reporting 90 Hz while it delivered frames at 80 and then a steady 72 a second
+        // (edigs, 1.3, 2026-11-11). Catch-up kept the speed right but fitted 90 ticks into 72 frames, so every fourth frame
+        // jumped two ticks: a regular stutter. When frames settle steadily slower than the reported rate, the tick follows the
+        // real frame interval instead, one tick per real frame. Uneven frames (Virtual Desktop's bursts) keep a median near
+        // the reported period and stay on catch-up.
+        readonly float[] frameGaps = new float[90];
+        int gapCount, gapIndex, sinceCheck, slowChecks;
+        float lastFrameT = -1f, pacedMs;  // pacedMs 0: follow the reported period
+        static readonly float[] CommonHz = { 45f, 60f, 72f, 75f, 80f, 90f, 100f, 120f, 144f };
+
+        void ResetPacing()
+        {
+            gapCount = gapIndex = sinceCheck = slowChecks = 0;
+            lastFrameT = -1f;
+            pacedMs = 0f;
+        }
+
+        float PacedPeriod(float reportedMs)
+        {
+            float t = Time.realtimeSinceStartup;
+            if (lastFrameT > 0f)
+            {
+                frameGaps[gapIndex] = (t - lastFrameT) * 1000f;
+                gapIndex = (gapIndex + 1) % frameGaps.Length;
+                if (gapCount < frameGaps.Length) gapCount++;
+            }
+            lastFrameT = t;
+            if (++sinceCheck >= 30 && gapCount >= 60)
+            {
+                sinceCheck = 0;
+                var sorted = new float[gapCount];
+                Array.Copy(frameGaps, sorted, gapCount);
+                Array.Sort(sorted);
+                float median = sorted[gapCount / 2];
+                if (median > reportedMs * 1.04f)
+                {
+                    float snapped = median;
+                    foreach (var hz in CommonHz)
+                        if (Mathf.Abs(1000f / hz - median) < median * 0.02f) snapped = 1000f / hz;
+                    if (pacedMs > 0f && Mathf.Abs(snapped - pacedMs) < pacedMs * 0.03f) slowChecks = 0;
+                    else if (++slowChecks >= 2)
+                    {
+                        slowChecks = 0;
+                        pacedMs = snapped;
+                        Plugin.Log.LogInfo(string.Format("PACING the headset reports {0:F1} Hz but frames arrive at {1:F1} a second: one game tick per real frame ({2:F2} ms)",
+                            1000f / reportedMs, 1000f / median, snapped));
+                    }
+                }
+                else
+                {
+                    slowChecks = 0;
+                    if (pacedMs > 0f)
+                    {
+                        pacedMs = 0f;
+                        Plugin.Log.LogInfo(string.Format("PACING frames match the headset's {0:F1} Hz again", 1000f / reportedMs));
+                    }
+                }
+            }
+            return pacedMs > 0f ? Mathf.Max(pacedMs, reportedMs) : reportedMs;
+        }
+
         void MatchTick(float periodMs)
         {
             if (periodMs > 0f) HeadsetHz = 1000f / periodMs;
             if (!MatchRefresh || periodMs <= 0f) return;
+            periodMs = PacedPeriod(periodMs);
             float period = periodMs / 1000f;
             if (Mathf.Abs(Time.fixedDeltaTime - period) < 0.00002f)
             {
