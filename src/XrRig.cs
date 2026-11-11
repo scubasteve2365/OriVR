@@ -93,7 +93,8 @@ namespace OriVR
         // holds when frames arrive below the headset rate or unevenly (Virtual Desktop at 90 Hz: 75 to 89 a second, the
         // game at 0.78 to 0.97 of normal speed, 2026-11-10). Off: at most one tick per frame, the game slows instead.
         internal bool CatchUp = true;
-        const int CatchUpTicks = 3;
+        // 6 headset frames: covers Virtual Desktop's stalls on Steve's Quest 3 (frames 25 ms or more late at 120 Hz, build 17).
+        const int CatchUpTicks = 6;
         float StepLimit(float period) { return CatchUp ? period * CatchUpTicks : period; }
         // How the stage reaches the headset. Steady draws it into each eye's full view (one projection layer). Floating
         // Panel hands it to the runtime as one quad layer per eye, which Virtual Desktop squashes and shears when the head
@@ -453,6 +454,8 @@ namespace OriVR
             int loggedVsync = 0, loggedTarget = -1;
             bool speedWarned = false;
             int fastFrames = 0, slowFrames = 0, statFrames = 0;  // frames where the game's own frame sync sped time up or slowed it
+            int lateOne = 0, lateSome = 0, lateFar = 0;
+            float longestGapMs = 0f, lastFrameReal = -1f;
             float tickAtStat = -1f;  // -1: the first window after VR starts, when the tick is still being matched
             while (active)
             {
@@ -531,6 +534,18 @@ namespace OriVR
                 }
 
                 statFrames++;
+                // How late each frame came, in headset frames: on time, 1 missed, 2 to 5 missed, 6 or more (beyond catch-up).
+                float frameNow = Time.realtimeSinceStartup;
+                if (lastFrameReal > 0f && info.periodMs > 0f)
+                {
+                    float gapMs = (frameNow - lastFrameReal) * 1000f;
+                    float periods = gapMs / info.periodMs;
+                    if (periods >= 6.5f) lateFar++;
+                    else if (periods >= 2.5f) lateSome++;
+                    else if (periods >= 1.5f) lateOne++;
+                    if (gapMs > longestGapMs) longestGapMs = gapMs;
+                }
+                lastFrameReal = frameNow;
                 if (Time.timeScale > 1.01f) fastFrames++;
                 else if (Time.timeScale > 0f && Time.timeScale < 0.99f) slowFrames++;
 
@@ -543,11 +558,14 @@ namespace OriVR
                     float fps = (Time.frameCount - framesAtStat) / span;
                     float gameSpeed = (Time.time - gameAtStat) / span;  // game seconds per real second, 1.000 is normal speed
                     float headsetHz = info.periodMs > 0f ? 1000f / info.periodMs : 0f;
-                    Plugin.Log.LogInfo(string.Format("XRSTAT state {0} shouldRender {1} period {2:F2} ms, unity {3:F1} fps, ticks {4:F1}/s, submitted {5}, with images {6}, skipped {7}, pairs {8}, game speed {9:F3}, tick {10:F2} ms, timeScale {11:F2}, game sync {12} (fast {13:F0}% slow {14:F0}% of frames), max step {15:F2} ms",
+                    Plugin.Log.LogInfo(string.Format("XRSTAT state {0} shouldRender {1} period {2:F2} ms, unity {3:F1} fps, ticks {4:F1}/s, submitted {5}, with images {6}, skipped {7}, pairs {8}, game speed {9:F3}, tick {10:F2} ms, timeScale {11:F2}, game sync {12} (fast {13:F0}% slow {14:F0}% of frames), max step {15:F2} ms, late frames: 1 missed {16}, 2 to 5 missed {17}, 6 or more {18}, longest {19:F0} ms, at {20:F0} s",
                         info.sessionState, info.shouldRender, info.periodMs, fps, (Plugin.Ticks - ticksAtStat) / span, frames, layers, skipped, renderedPairs + " eye " + EyeWidth,
                         gameSpeed, Time.fixedDeltaTime * 1000f, Time.timeScale,
                         PhysicsLimitTest.IsSynced && SyncFramesTest.EnabledForceFixedUpdate ? "on" : "off",
-                        statFrames > 0 ? 100f * fastFrames / statFrames : 0f, statFrames > 0 ? 100f * slowFrames / statFrames : 0f, Time.maximumDeltaTime * 1000f));
+                        statFrames > 0 ? 100f * fastFrames / statFrames : 0f, statFrames > 0 ? 100f * slowFrames / statFrames : 0f, Time.maximumDeltaTime * 1000f,
+                        lateOne, lateSome, lateFar, longestGapMs, now));
+                    lateOne = lateSome = lateFar = 0;
+                    longestGapMs = 0f;
                     int fastShare = statFrames > 0 ? 100 * fastFrames / statFrames : 0, slowShare = statFrames > 0 ? 100 * slowFrames / statFrames : 0;
                     fastFrames = slowFrames = statFrames = 0;
                     // Normal speed needs the frames the headset asks for. Paused (menu) or the game's own slow motion is not a fault.

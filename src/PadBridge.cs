@@ -34,7 +34,7 @@ namespace OriVR
             if (active != wasActive)
             {
                 wasActive = active;
-                Plugin.Log.LogInfo(active ? "PAD the PlayStation pad drives the game as an Xbox pad (no Xbox pad connected)" : "PAD the game reads its own pads again");
+                Plugin.Log.LogInfo(string.Format("[at {0:F1} s] ", Time.realtimeSinceStartup) + (active ? "PAD the PlayStation pad drives the game as an Xbox pad (no Xbox pad connected)" : "PAD the game reads its own pads again"));
             }
             return active;
         }

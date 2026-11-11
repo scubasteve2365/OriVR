@@ -1099,6 +1099,7 @@ static volatile LONG g_padButtons;           // PadBit flags, 0 when no pad
 static volatile LONG g_padStick = (LONG)0x80808080;  // left x | left y << 8 | right x << 16 | right y << 24, 128 centre, y grows downward
 static volatile LONG g_padKind;              // 0 none, 1 DualShock 4, 2 DualSense
 static volatile LONG g_padStarted;
+static double g_padStartSeconds;
 enum PadBit { PadUp = 1, PadDown = 2, PadLeft = 4, PadRight = 8, PadCross = 16, PadCircle = 32, PadSquare = 64, PadTriangle = 128,
               PadL3 = 256, PadR3 = 512, PadOptions = 1024, PadCreate = 2048, PadPS = 4096,
               PadL1 = 8192, PadR1 = 16384, PadL2 = 32768, PadR2 = 65536, PadConnected = 1 << 30 };
@@ -1171,7 +1172,12 @@ static HANDLE OpenPad(int& kind) {
         }
         kind = k;
         found = h;
-        Log("PAD %s connected, %04x:%04x, read directly for the mod menu", k == 2 ? "DualSense" : "DualShock 4", a.VendorID, a.ProductID);
+        // Bluetooth HID devices carry the HID-over-Bluetooth service ID in their path.
+        std::string path = det->DevicePath;
+        for (auto& c : path) c = (char)tolower((unsigned char)c);
+        bool bluetooth = path.find("00001124-0000-1000-8000-00805f9b34fb") != std::string::npos || path.find("bthenum") != std::string::npos;
+        Log("PAD %s connected over %s, %04x:%04x, read directly (%.1f s after the mod started)", k == 2 ? "DualSense" : "DualShock 4",
+            bluetooth ? "Bluetooth" : "USB", a.VendorID, a.ProductID, GetTickCount64() / 1000.0 - g_padStartSeconds);
     }
     SetupDiDestroyDeviceInfoList(set);
     return found;
@@ -1207,13 +1213,14 @@ static DWORD WINAPI PadThread(void*) {
         g_padKind = 0;
         g_padButtons = 0;
         g_padStick = (LONG)0x80808080;
-        Log("PAD %s disconnected", kind == 2 ? "DualSense" : "DualShock 4");
+        Log("PAD %s disconnected (%.1f s after the mod started)", kind == 2 ? "DualSense" : "DualShock 4", GetTickCount64() / 1000.0 - g_padStartSeconds);
         Sleep(500);
     }
 }
 
 API void OriPad_Start() {
     if (InterlockedExchange(&g_padStarted, 1) == 0) {
+        g_padStartSeconds = GetTickCount64() / 1000.0;
         HANDLE t = CreateThread(nullptr, 0, PadThread, nullptr, 0, nullptr);
         if (t) CloseHandle(t);
     }

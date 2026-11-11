@@ -265,7 +265,7 @@ namespace OriVR
                 if (kind != lastPadKind)
                 {
                     if (lastPadKind >= 0 || kind != 0)
-                        Plugin.Log.LogInfo(kind == 0 ? "PAD no PlayStation pad read directly" : "PAD " + (kind == 2 ? "DualSense" : "DualShock 4") + " ready for the mod menu: both sticks open it, Cross selects, Circle closes");
+                        Plugin.Log.LogInfo(string.Format("[at {0:F1} s] ", Time.realtimeSinceStartup) + (kind == 0 ? "PAD no PlayStation pad read directly" : "PAD " + (kind == 2 ? "DualSense" : "DualShock 4") + " ready for the mod menu: both sticks open it, Cross selects, Circle closes"));
                     lastPadKind = kind;
                 }
             }
