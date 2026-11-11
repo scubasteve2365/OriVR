@@ -42,11 +42,21 @@ Refresh rate: 72, 80 or 90 Hz. Ori gains nothing above 90 Hz, and over a wireles
 | Sharpen | Crisper edges. Too high looks harsh |
 | Resolution | 100% matches your headset. Higher costs speed and adds little in this game |
 | Picture | Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head |
-| Surround | What you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black |
+| Surround | What you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black. Ambient lights the room around the stage with the game's own colours (see below) |
 | Frame catch-up | On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. Off: the game slows down a little whenever frames are missed, as the original game does |
 | Recenter | Puts the stage in front of you again |
 
 If far backgrounds strain your eyes, lower Depth or raise Pop-out.
+
+### Ambient surround
+
+Surround: Ambient turns the dark around the stage into a room lit by the game, like Ambilight but far bigger. It always uses Steady.
+
+- **Wall glow:** a large virtual wall just behind the stage glows with the colours at the nearest stage edge, bright near the edge and fading into soft clouds several metres out.
+- **Room fill and flashes:** the whole room, to your sides and behind you too, takes on the scene's colour. Brightness changes punch through: a part of the picture that suddenly brightens flares its side of the room, and a flash anywhere (Charge Flame, Light Burst) lights the whole room in its colour for a moment.
+- **Overscan:** the game is rendered wider than the stage. Past the stage edge the background fades out at once, but effects that stand out from their surroundings (embers, sparks, spirit light, flashes) carry on, so they seem to escape the screen. The HUD stays on the stage. While overscan is on, the game keeps objects switched on a little further outside its own camera.
+
+Its settings are in the `[Ambient]` section of `BepInEx\config\com.scubasteve2365.orivr.cfg` (each is described there): `Strength`, `Spread`, `RoomFill`, `WallDistance`, `Smoothing`, `React`, `AdaptTime`, `Flash`, `Overscan` (1 is off), `OverscanFade`, `OverscanEffects`, `OverscanEffectsReach`, `OverscanEffectsThreshold`. With the default stage size the stage fills much of your view; a smaller or more distant stage leaves more room for the light.
 
 ## Good to know
 

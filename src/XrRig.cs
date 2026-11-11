@@ -69,6 +69,12 @@ namespace OriVR
         FailedLayersFn OriXR_FailedLayers;
         SetLayerModeFn OriXR_SetSurround;
         ActiveLayerFn OriXR_CanSeeThrough;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetAmbientFn(float strength, float spread, float fill, float behind, float smoothing);
+        SetAmbientFn OriXR_SetAmbient;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetOverscanFn(float factor, float fade, float effects, float reach, float threshold);
+        SetOverscanFn OriXR_SetOverscan;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetReactFn(float react, float slowTime, float flash);
+        SetReactFn OriXR_SetReact;
         TestRuntimeFn OriXR_TestRuntime;
         VoidFn OriPad_Start;
         ActiveLayerFn OriPad_Buttons, OriPad_Kind, OriPad_Stick;
@@ -100,7 +106,16 @@ namespace OriVR
         // Panel hands it to the runtime as one quad layer per eye, which Virtual Desktop squashes and shears when the head
         // moves. Auto chooses by OpenXR runtime.
         internal int PictureMode;  // 0 Auto, 1 Steady, 2 Floating Panel
-        internal int Surround;     // 0 Black, 1 Green (chroma-key passthrough), 2 Transparent (runtime see-through)
+        internal int Surround;     // 0 Black, 1 Green (chroma-key passthrough), 2 Transparent (runtime see-through), 3 Ambient
+        // Ambient surround: how bright the wall glow is, how far it reaches (metres), how much the whole room takes the
+        // scene's colour, how far behind the stage the glowing wall sits (metres), and how slowly colours follow (seconds).
+        // Overscan (Ambient only): the game is rendered this many times wider and taller than the stage, and the border
+        // fades out around it, bright effects last. 1 is off.
+        internal float Overscan = 1.8f, OverscanFade = 0.04f, OverscanEffects = 1.0f, OverscanReach = 0.35f, OverscanThreshold = 0.06f;
+        // How strongly the glow flares when the game brightens and dims when it darkens, against the last few seconds.
+        internal float AmbientReact = 1.2f, AmbientAdapt = 1.5f, AmbientFlash = 6f;
+        internal float EffOverscan { get { return Surround == 3 ? Mathf.Clamp(Overscan, 1f, 2.5f) : 1f; } }
+        internal float AmbientStrength = 1.5f, AmbientSpread = 1.0f, AmbientFill = 0.5f, AmbientBehind = 0.3f, AmbientSmoothing = 0.03f;
         // Known once OpenXR has started: whether the runtime offers a see-through blend mode for Transparent.
         internal bool SeeThroughKnown { get { return RuntimeName.Length > 0; } }
         internal bool CanSeeThrough { get { return OriXR_CanSeeThrough != null && OriXR_CanSeeThrough() != 0; } }
@@ -118,7 +133,8 @@ namespace OriVR
             return name.IndexOf("virtualdesktop", StringComparison.Ordinal) >= 0 || name.IndexOf("vdxr", StringComparison.Ordinal) >= 0;
         }
 
-        internal bool WantSteady { get { return PictureMode == 1 || (PictureMode == 0 && AutoPicksSteady(RuntimeName)); } }
+        // Ambient is drawn into the eyes' views, so it always uses Steady.
+        internal bool WantSteady { get { return Surround == 3 || PictureMode == 1 || (PictureMode == 0 && AutoPicksSteady(RuntimeName)); } }
 
         // What the headset is really being sent right now, for the menu.
         internal string ActiveLayerName
@@ -190,6 +206,9 @@ namespace OriVR
             OriXR_FailedLayers = Fn<FailedLayersFn>(module, "OriXR_FailedLayers");
             OriXR_SetSurround = Fn<SetLayerModeFn>(module, "OriXR_SetSurround");
             OriXR_CanSeeThrough = Fn<ActiveLayerFn>(module, "OriXR_CanSeeThrough");
+            OriXR_SetAmbient = Fn<SetAmbientFn>(module, "OriXR_SetAmbient");
+            OriXR_SetOverscan = Fn<SetOverscanFn>(module, "OriXR_SetOverscan");
+            OriXR_SetReact = Fn<SetReactFn>(module, "OriXR_SetReact");
             OriXR_TestRuntime = Fn<TestRuntimeFn>(module, "OriXR_TestRuntime");
             OriPad_Start = Fn<VoidFn>(module, "OriPad_Start");
             OriPad_Buttons = Fn<ActiveLayerFn>(module, "OriPad_Buttons");
@@ -243,6 +262,9 @@ namespace OriVR
             OriXR_Start(eyeOut[0].GetNativeTexturePtr(), eyeOut[1].GetNativeTexturePtr(), EyeWidth, EyeHeight);
             GL.IssuePluginEvent(renderEvent, EventInit);
             active = true;
+            // The window may already have lost focus to SteamVR or Steam Link before VR started (see FocusPatch).
+            GameController.IsFocused = true;
+            Application.runInBackground = true;
             Plugin.Log.LogInfo(string.Format("VR starting: eye {0}x{1}, stage {2} m wide at {3} m, separation x{4}", EyeWidth, EyeHeight, StageWidth, StageDistance, Separation));
             StartCoroutine(Loop());
         }
@@ -327,7 +349,8 @@ namespace OriVR
             int rec = OriXR_RecommendedWidth != null ? OriXR_RecommendedWidth() : 0;
             if (rec <= 0 || eyeTanSpan <= 0f) return EyeWidth;
             // The stage is flat, so pixel density across it compares directly with the headset's flat eye image.
-            int w = Mathf.RoundToInt(rec * (StageWidth / StageDistance) / eyeTanSpan * Sharpness);
+            // The eye image covers the overscan border too, at the same pixel density.
+            int w = Mathf.RoundToInt(rec * (StageWidth * EffOverscan / StageDistance) / eyeTanSpan * Sharpness);
             return Mathf.Clamp(w / 16 * 16, 1280, 6144);
         }
 
@@ -430,6 +453,9 @@ namespace OriVR
             OriXR_SetSharpen(Sharpen);
             OriXR_SetLayerMode(WantSteady ? 1 : 0);
             OriXR_SetSurround(Surround);
+            OriXR_SetAmbient(AmbientStrength, AmbientSpread, AmbientFill, AmbientBehind, AmbientSmoothing);
+            OriXR_SetOverscan(EffOverscan, OverscanFade, OverscanEffects, OverscanReach, OverscanThreshold);
+            OriXR_SetReact(AmbientReact, AmbientAdapt, AmbientFlash);
             var c = viewPoint + viewTurn * new Vector3(0f, 0f, -StageDistance);
             OriXR_SetStage(c.x, c.y, c.z, StageWidth, StageWidth * EyeHeight / EyeWidth, viewTurn.y, viewTurn.w);
         }
@@ -616,6 +642,11 @@ namespace OriVR
             // Camera velocity is worked out from the last render's position, so the second eye starts from the same place.
             object lastPos = LastPosField.GetValue(post);
 
+            // Overscan widens only the gameplay camera. The HUD camera and the helper cameras that the game's post-process
+            // renders into the same image keep their own view, so they are shrunk to the stage in the middle of it.
+            float k = EffOverscan;
+            var shrunk = k > 1.001f ? ShrinkToStage(1f / k) : null;
+
             for (int i = 0; i < 2; i++)
             {
                 EyeIndex = i;
@@ -635,7 +666,7 @@ namespace OriVR
                 float eyeDist = Mathf.Max(dist + local.z * unitsPerMetre, dist * 0.25f);
 
                 cam.worldToCameraMatrix = Matrix4x4.TRS(new Vector3(-x, -y, -(eyeDist - dist)), Quaternion.identity, Vector3.one) * view;
-                cam.projectionMatrix = RenderTests.EyeProjection(cam, x, y, eyeDist, planeZ);
+                cam.projectionMatrix = RenderTests.EyeProjection(cam, x, y, eyeDist, planeZ, EffOverscan);
                 var alpha = crossFading ? fadeAlpha[i, CrossFadePatch.CurrentView(Game.UI.Cameras.System.UberPostProcessingCrossFade)] : eyeAlpha[i];
                 post.CurrentAlphaBuffer = alpha;
                 alpha.SetCurrentAlphaGrab();
@@ -647,6 +678,7 @@ namespace OriVR
                 RenderTests.SkipTurbulenceNow = false;
                 Finish(i);
             }
+            if (shrunk != null) foreach (var c in shrunk) if (c != null) c.ResetProjectionMatrix();
             cam.ResetWorldToCameraMatrix();
             cam.ResetProjectionMatrix();
             cam.cullingMask = 0;
@@ -661,6 +693,27 @@ namespace OriVR
                 SaveEyes();
             }
             if (compareNow) CompareEyes();
+        }
+
+        static readonly System.Reflection.FieldInfo SubCamsField = HarmonyLib.AccessTools.Field(typeof(UberPostProcess), "s_subCams");
+        readonly System.Collections.Generic.List<Camera> shrinkList = new System.Collections.Generic.List<Camera>();
+
+        // Scales the HUD camera's and the post-process helper cameras' pictures toward the image centre by the given
+        // factor, so with overscan they cover the stage only. Returns the cameras changed, to be reset after the eyes.
+        System.Collections.Generic.List<Camera> ShrinkToStage(float factor)
+        {
+            shrinkList.Clear();
+            var ui = UberUIPostProcess.Instance;
+            if (ui != null && ui.Camera != null) shrinkList.Add(ui.Camera);
+            var subs = SubCamsField != null ? SubCamsField.GetValue(null) as System.Collections.IEnumerable : null;
+            if (subs != null) foreach (var s in subs) { var p = s as UberPostProcess; if (p != null && p.Camera != null && p.Camera != cam) shrinkList.Add(p.Camera); }
+            var scale = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(factor, factor, 1f));
+            foreach (var c in shrinkList)
+            {
+                c.ResetProjectionMatrix();
+                c.projectionMatrix = scale * c.projectionMatrix;
+            }
+            return shrinkList;
         }
 
         // Copies the eye image to the texture the native side sends on, upside down if asked, with the frame number.
