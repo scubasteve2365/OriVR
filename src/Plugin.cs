@@ -7,9 +7,9 @@ using UnityEngine;
 
 namespace OriVR
 {
-    // Build 14 (release 1.2.1): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
+    // Build 15 (release 1.2.2): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
     // OpenXR cannot start the game stays flat. Telemetry is stopped, because the lab keeps this game offline.
-    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.1")]
+    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.2.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log;
@@ -70,6 +70,11 @@ namespace OriVR
             rig.Surround = SurroundCode(surround.Value);
             menu = gameObject.AddComponent<MenuUI>();
             menu.Rig = rig;
+            var menuKey = Config.Bind("Menu", "OpenKey", "Insert", "Keyboard key that opens and closes the mod menu. Arrow keys choose and change, Enter selects, Esc or Backspace closes. Any Unity KeyCode name, for example Insert or F1.");
+            try { menu.OpenKey = (KeyCode)Enum.Parse(typeof(KeyCode), menuKey.Value, true); }
+            catch (Exception) { Log.LogWarning("Menu.OpenKey '" + menuKey.Value + "' is not a key name, Insert used"); }
+            rig.LoadNative();  // early, so the PlayStation pad reader runs before VR starts
+            PadBridge.Rig = rig;
             menu.RowText = MenuRowText;
             menu.RowTip = MenuRowTip;
             menu.Problem = () => rig.StartProblem;
@@ -82,7 +87,7 @@ namespace OriVR
             rig.EyeWidth = eyeWidth.Value;
             rig.EyeHeight = eyeWidth.Value * 9 / 16;
             new Harmony("com.scubasteve2365.orivr").PatchAll(typeof(Plugin).Assembly);
-            Log.LogInfo("OriVR 1.2.1 (build 14) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
+            Log.LogInfo("OriVR 1.2.2 (build 15) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
         }
 
         void FixedUpdate() { ticks++; Ticks = ticks; }
@@ -106,6 +111,35 @@ namespace OriVR
             }
         }
 
+        // Lab test: made-up reports in each layout with Cross, L3, R3 and d-pad up pressed, left stick full left.
+        void PadTest()
+        {
+            var cases = new[]
+            {
+                new { Name = "DualSense USB 0x01", Kind = 2, Report = Report(64, 0x01, 1, 8) },
+                new { Name = "DualSense Bluetooth 0x31", Kind = 2, Report = Report(78, 0x31, 2, 9) },
+                new { Name = "DualSense Bluetooth short 0x01", Kind = 2, Report = Report(10, 0x01, 1, 5) },
+                new { Name = "DualShock 4 USB 0x01", Kind = 1, Report = Report(64, 0x01, 1, 5) },
+                new { Name = "DualShock 4 Bluetooth 0x11", Kind = 1, Report = Report(78, 0x11, 3, 7) },
+            };
+            foreach (var c in cases)
+            {
+                int v = rig.PadParseTest(c.Kind, c.Report);
+                bool ok = v == ((1 << 30) | 1 | 16 | 256 | 512);
+                Log.LogInfo(string.Format("PADTEST {0}: flags {1}, {2}", c.Name, v, ok ? "ok" : "WRONG"));
+            }
+        }
+
+        static byte[] Report(int length, byte id, int stick, int buttons)
+        {
+            var r = new byte[length];
+            r[0] = id;
+            r[stick] = 0; r[stick + 1] = 128; r[stick + 2] = 128; r[stick + 3] = 128;
+            r[buttons] = 0x00 | 0x20;           // d-pad up (0), Cross
+            r[buttons + 1] = 0x40 | 0x80;       // L3, R3
+            return r;
+        }
+
         string MenuRowTip(int row)
         {
             switch (row)
@@ -124,7 +158,7 @@ namespace OriVR
                 case 7: return SurroundTip();
                 case 8: return "Puts the stage straight in front of where you are looking now.";
                 case 9: return "Puts every setting on this page back to how it started.";
-                default: return "Closes this menu and goes back to the game.";
+                default: return "Closes this menu and goes back to the game. Clicking both sticks or pressing " + menu.OpenKey + " also opens and closes it.";
             }
         }
 
@@ -295,6 +329,7 @@ namespace OriVR
                 }
                 else if (line.StartsWith("xrjson ")) rig.TestRuntime(line == "xrjson none" ? "" : line.Substring(7), false);
                 else if (line.StartsWith("xrnofallback ")) rig.TestRuntime(line == "xrnofallback none" ? "" : line.Substring(13), true);
+                else if (line == "padtest") PadTest();
                 else if (line == "picturetest")
                 {
                     foreach (var name in new[] { "SteamVR/OpenXR", "VirtualDesktopXR", "Virtual Desktop", "virtual-desktop", "VisionALVR (VDXR)", "Oculus", "Windows Mixed Reality Runtime", "Pimax", "", null })

@@ -28,7 +28,9 @@ If the game stays flat for another reason, click both sticks to open the menu. I
 
 ## Settings
 
-Click both sticks at once to open the menu in the headset. The game pauses while it is open. Up and down choose a setting, left and right change it, A selects and B closes.
+Click both sticks at once to open the menu in the headset, on an Xbox pad or a PlayStation DualSense or DualShock 4, or press Insert on the keyboard. The game pauses while it is open. Up and down choose a setting, left and right change it, A (Cross) selects and B (Circle) closes. On the keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes. The key can be changed in the config file (`[Menu] OpenKey`). While the menu is open the game gets no input.
+
+PlayStation pads: a DualSense, DualSense Edge or DualShock 4 works in the game too, over USB or Bluetooth, with or without Steam Input. Without Steam Input the mod passes it to the game as an Xbox pad (Cross is A, Circle B, Square X, Triangle Y, Options Start). The game's own button prompts still show Xbox buttons.
 
 | Setting | What it does |
 |---|---|

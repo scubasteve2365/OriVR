@@ -44,6 +44,8 @@ namespace OriVR
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void StatsFn(out uint frames, out uint layers, out uint skipped);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetLayerModeFn(int mode);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int LastErrorFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void VoidFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ParseTestFn(int kind, byte[] report, int length);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void TestRuntimeFn([MarshalAs(UnmanagedType.LPStr)] string manifest, int noFallback);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ActiveLayerFn();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void RuntimeInfoFn(StringBuilder runtime, int runtimeSize, StringBuilder system, int systemSize);
@@ -66,6 +68,9 @@ namespace OriVR
         SetLayerModeFn OriXR_SetSurround;
         ActiveLayerFn OriXR_CanSeeThrough;
         TestRuntimeFn OriXR_TestRuntime;
+        VoidFn OriPad_Start;
+        ActiveLayerFn OriPad_Buttons, OriPad_Kind, OriPad_Stick;
+        ParseTestFn OriPad_ParseTest;
 
         static T Fn<T>(IntPtr module, string name) where T : class
         {
@@ -148,7 +153,7 @@ namespace OriVR
 
         internal bool Active { get { return active; } }
 
-        bool LoadNative()
+        internal bool LoadNative()
         {
             if (nativeLoaded) return true;
             var path = Path.Combine(PluginDir, Dll + ".dll");
@@ -176,6 +181,12 @@ namespace OriVR
             OriXR_SetSurround = Fn<SetLayerModeFn>(module, "OriXR_SetSurround");
             OriXR_CanSeeThrough = Fn<ActiveLayerFn>(module, "OriXR_CanSeeThrough");
             OriXR_TestRuntime = Fn<TestRuntimeFn>(module, "OriXR_TestRuntime");
+            OriPad_Start = Fn<VoidFn>(module, "OriPad_Start");
+            OriPad_Buttons = Fn<ActiveLayerFn>(module, "OriPad_Buttons");
+            OriPad_Kind = Fn<ActiveLayerFn>(module, "OriPad_Kind");
+            OriPad_Stick = Fn<ActiveLayerFn>(module, "OriPad_Stick");
+            OriPad_ParseTest = Fn<ParseTestFn>(module, "OriPad_ParseTest");
+            OriPad_Start();
             renderEvent = OriXR_GetRenderEvent();
             nativeLoaded = true;
             return true;
@@ -257,6 +268,12 @@ namespace OriVR
                 return "The game is flat because no usable 32-bit OpenXR runtime was found (error -51). Update SteamVR, then in SteamVR Settings, under OpenXR, set SteamVR as the OpenXR runtime, and restart the game." + log;
             return "The game is flat because OpenXR could not start" + (error != 0 ? " (error " + error + ")" : "") + ". Check your headset is on and its VR software is running, then restart the game." + log;
         }
+
+        // PlayStation pad read by the native DLL: PadBit flags (0 when none), kind 0 none, 1 DualShock 4, 2 DualSense.
+        internal int PadButtons { get { return OriPad_Buttons != null ? OriPad_Buttons() : 0; } }
+        internal int PadKind { get { return OriPad_Kind != null ? OriPad_Kind() : 0; } }
+        internal int PadStick { get { return OriPad_Stick != null ? OriPad_Stick() : unchecked((int)0x80808080); } }
+        internal int PadParseTest(int kind, byte[] report) { return OriPad_ParseTest(kind, report, report.Length); }
 
         internal void TestRuntime(string manifest, bool noFallback) { OriXR_TestRuntime(manifest, noFallback ? 1 : 0); }
 

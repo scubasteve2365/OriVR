@@ -10,6 +10,11 @@
 // eye only; under Virtual Desktop those quads squash and shear when the head moves. Errors are logged, never fatal: a
 // failed OpenXR start leaves the game running flat.
 #include <windows.h>
+#include <setupapi.h>
+#include <hidsdi.h>
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "hid.lib")
+#include <windows.h>
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <cmath>
@@ -1047,6 +1052,148 @@ API void OriXR_SetSharpen(float amount) { g_sharpen = amount; }
 API void OriXR_DumpNext(const char* basePath) { strcpy_s(g_dumpPath, basePath); g_dumpWanted = 1; }
 API int OriXR_RecommendedWidth() { return g_recW; }
 API void OriXR_SetLayerMode(int mode) { g_layerMode = mode ? 1 : 0; }
+// ---------------------------------------------------------------------------------------------------------------------
+// PlayStation pads for the mod menu. The game only knows Xbox (XInput) pads and a generic joystick mapping, so a
+// DualSense or DualShock 4 is read here directly through Windows' HID functions, on its own thread, read-only. The game
+// itself is not changed: players still play through Steam Input or the game's own joystick mapping.
+// Report layouts: report ID first, then left stick X, Y, right stick X, Y, then the button bytes:
+//   byte 0: low 4 bits d-pad (0 up, clockwise to 7 up-left, 8 none), 0x10 Square, 0x20 Cross, 0x40 Circle, 0x80 Triangle
+//   byte 1: 0x01 L1, 0x02 R1, 0x04 L2, 0x08 R2, 0x10 Create/Share, 0x20 Options, 0x40 L3, 0x80 R3
+//   byte 2: 0x01 PS
+// DualSense USB report 0x01 (64 bytes) has triggers and a counter before the buttons; Bluetooth report 0x31 adds one
+// byte in front; the short Bluetooth report 0x01 is laid out like a DualShock 4. DualShock 4 Bluetooth report 0x11 adds two.
+static volatile LONG g_padButtons;           // PadBit flags, 0 when no pad
+static volatile LONG g_padStick = (LONG)0x80808080;  // left x | left y << 8 | right x << 16 | right y << 24, 128 centre, y grows downward
+static volatile LONG g_padKind;              // 0 none, 1 DualShock 4, 2 DualSense
+static volatile LONG g_padStarted;
+enum PadBit { PadUp = 1, PadDown = 2, PadLeft = 4, PadRight = 8, PadCross = 16, PadCircle = 32, PadSquare = 64, PadTriangle = 128,
+              PadL3 = 256, PadR3 = 512, PadOptions = 1024, PadCreate = 2048, PadPS = 4096,
+              PadL1 = 8192, PadR1 = 16384, PadL2 = 32768, PadR2 = 65536, PadConnected = 1 << 30 };
+
+static bool ParsePadReport(int kind, const unsigned char* r, DWORD n, LONG& buttons, LONG& stick) {
+    int lx, b;
+    if (n < 10) return false;
+    if (kind == 2 && r[0] == 0x01 && n >= 64) { lx = 1; b = 8; }        // DualSense, USB
+    else if (kind == 2 && r[0] == 0x31 && n >= 13) { lx = 2; b = 9; }   // DualSense, Bluetooth full report
+    else if (r[0] == 0x01) { lx = 1; b = 5; }                            // DualShock 4 USB, either pad's short Bluetooth report
+    else if (kind == 1 && r[0] == 0x11 && n >= 12) { lx = 3; b = 7; }   // DualShock 4, Bluetooth full report
+    else return false;
+    unsigned b0 = r[b], b1 = r[b + 1], b2 = r[b + 2];
+    static const LONG hat[9] = {PadUp, PadUp | PadRight, PadRight, PadDown | PadRight, PadDown, PadDown | PadLeft, PadLeft, PadUp | PadLeft, 0};
+    LONG v = PadConnected | hat[(b0 & 0x0f) > 8 ? 8 : (b0 & 0x0f)];
+    if (b0 & 0x10) v |= PadSquare;
+    if (b0 & 0x20) v |= PadCross;
+    if (b0 & 0x40) v |= PadCircle;
+    if (b0 & 0x80) v |= PadTriangle;
+    if (b1 & 0x01) v |= PadL1;
+    if (b1 & 0x02) v |= PadR1;
+    if (b1 & 0x04) v |= PadL2;
+    if (b1 & 0x08) v |= PadR2;
+    if (b1 & 0x10) v |= PadCreate;
+    if (b1 & 0x20) v |= PadOptions;
+    if (b1 & 0x40) v |= PadL3;
+    if (b1 & 0x80) v |= PadR3;
+    if (b2 & 0x01) v |= PadPS;
+    buttons = v;
+    stick = (LONG)(r[lx] | (r[lx + 1] << 8) | (r[lx + 2] << 16) | ((unsigned)r[lx + 3] << 24));
+    return true;
+}
+
+static int PadKindOf(USHORT vendor, USHORT product) {
+    if (vendor != 0x054C) return 0;
+    if (product == 0x0CE6 || product == 0x0DF2) return 2;                       // DualSense, DualSense Edge
+    if (product == 0x05C4 || product == 0x09CC || product == 0x0BA0) return 1;  // DualShock 4 v1, v2, wireless adapter
+    return 0;
+}
+
+static HANDLE OpenPad(int& kind) {
+    GUID hid;
+    HidD_GetHidGuid(&hid);
+    HDEVINFO set = SetupDiGetClassDevsA(&hid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (set == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    HANDLE found = INVALID_HANDLE_VALUE;
+    static bool loggedBusy;
+    SP_DEVICE_INTERFACE_DATA d{sizeof(d)};
+    for (DWORD i = 0; found == INVALID_HANDLE_VALUE && SetupDiEnumDeviceInterfaces(set, nullptr, &hid, i, &d); i++) {
+        DWORD need = 0;
+        SetupDiGetDeviceInterfaceDetailA(set, &d, nullptr, 0, &need, nullptr);
+        if (!need) continue;
+        std::vector<char> buf(need);
+        auto det = (PSP_DEVICE_INTERFACE_DETAIL_DATA_A)buf.data();
+        det->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
+        if (!SetupDiGetDeviceInterfaceDetailA(set, &d, det, need, nullptr, nullptr)) continue;
+        // Identify without asking for read access, so keyboards and mice are never opened for reading.
+        HANDLE q = CreateFileA(det->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (q == INVALID_HANDLE_VALUE) continue;
+        HIDD_ATTRIBUTES a{sizeof(a)};
+        int k = HidD_GetAttributes(q, &a) ? PadKindOf(a.VendorID, a.ProductID) : 0;
+        CloseHandle(q);
+        if (!k) continue;
+        HANDLE h = CreateFileA(det->DevicePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            if (!loggedBusy) Log("PAD %s found but another program holds it (error %lu). The menu uses the Xbox pad Steam Input presents instead.",
+                                 k == 2 ? "DualSense" : "DualShock 4", GetLastError());
+            loggedBusy = true;
+            continue;
+        }
+        kind = k;
+        found = h;
+        Log("PAD %s connected, %04x:%04x, read directly for the mod menu", k == 2 ? "DualSense" : "DualShock 4", a.VendorID, a.ProductID);
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return found;
+}
+
+static DWORD WINAPI PadThread(void*) {
+    unsigned char rep[256];
+    for (;;) {
+        int kind = 0;
+        HANDLE h = OpenPad(kind);
+        if (h == INVALID_HANDLE_VALUE) { Sleep(2000); continue; }
+        g_padKind = kind;
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        int silent = 0;
+        for (;;) {
+            ResetEvent(ov.hEvent);
+            DWORD got = 0;
+            if (!ReadFile(h, rep, sizeof(rep), nullptr, &ov) && GetLastError() != ERROR_IO_PENDING) break;
+            if (WaitForSingleObject(ov.hEvent, 1000) != WAIT_OBJECT_0) {
+                CancelIo(h);
+                GetOverlappedResult(h, &ov, &got, TRUE);
+                if (++silent >= 5) { g_padButtons = PadConnected; }  // idle Bluetooth pads send only on change
+                continue;
+            }
+            if (!GetOverlappedResult(h, &ov, &got, FALSE)) break;
+            silent = 0;
+            LONG b, s;
+            if (ParsePadReport(kind, rep, got, b, s)) { g_padStick = s; g_padButtons = b; }
+        }
+        CloseHandle(ov.hEvent);
+        CloseHandle(h);
+        g_padKind = 0;
+        g_padButtons = 0;
+        g_padStick = (LONG)0x80808080;
+        Log("PAD %s disconnected", kind == 2 ? "DualSense" : "DualShock 4");
+        Sleep(500);
+    }
+}
+
+API void OriPad_Start() {
+    if (InterlockedExchange(&g_padStarted, 1) == 0) {
+        HANDLE t = CreateThread(nullptr, 0, PadThread, nullptr, 0, nullptr);
+        if (t) CloseHandle(t);
+    }
+}
+API int OriPad_Buttons() { return (int)g_padButtons; }
+API int OriPad_Kind() { return (int)g_padKind; }
+API int OriPad_Stick() { return (int)g_padStick; }
+// Lab test: parse a made-up report, returns the button flags or -1.
+API int OriPad_ParseTest(int kind, const unsigned char* report, int length) {
+    LONG b, s;
+    return ParsePadReport(kind, report, (DWORD)length, b, s) ? (int)(b | ((s & 0xff) == 0 ? 0 : 0)) : -1;
+}
+
 API void OriXR_SetSurround(int mode) { g_surround = mode; }
 API int OriXR_CanSeeThrough() { return (g_canAlphaBlend || g_canAdditive) ? 1 : 0; }
 API int OriXR_LastError() { return (int)g_lastXrError; }

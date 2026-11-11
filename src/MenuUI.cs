@@ -22,6 +22,15 @@ namespace OriVR
         internal Func<int, string> RowTip;
         internal Func<string> Problem;     // why VR did not start, or null
         internal Action Closed;
+        internal KeyCode OpenKey = KeyCode.Insert;
+
+        // PlayStation pad flags from the native DLL (same values as PadBit there).
+        const int PsUp = 1, PsDown = 2, PsLeft = 4, PsRight = 8, PsCross = 16, PsCircle = 32, PsL3 = 256, PsR3 = 512, PsConnected = 1 << 30;
+        enum Device { Xbox, PlayStation, Keyboard }
+        Device lastDevice = Device.Xbox;
+        Device shownHintFor = (Device)(-1);
+        int lastPadKind = -1;
+        float nextPadCheck;
 
         internal bool IsOpen { get; private set; }
 
@@ -46,6 +55,7 @@ namespace OriVR
             if (root == null && !Build()) return;
             root.SetActive(true);
             IsOpen = true;
+            PadBridge.BlockGame = true;
             selected = 0;
             lastSelected = -1;
             for (int i = 0; i < Rows; i++) shown[i] = null;
@@ -106,7 +116,7 @@ namespace OriVR
             tipBox.color = Title;
             hintBox = MakeText(root.transform, style, -1.68f, 0.36f);
             hintBox.color = Dim;
-            Show(hintBox, "Up and down: choose.   Left and right: change.   A: select.   B: close");
+            shownHintFor = (Device)(-1);
             SetLayer(root);
             root.SetActive(false);
             return true;
@@ -210,6 +220,13 @@ namespace OriVR
                 Show(rows[i], text);
             }
             if (bar != null) bar.localPosition = new Vector3(0f, RowY(selected), 0.25f);
+            if (shownHintFor != lastDevice && hintBox != null)
+            {
+                shownHintFor = lastDevice;
+                Show(hintBox, lastDevice == Device.PlayStation ? "Up and down: choose.   Left and right: change.   Cross: select.   Circle: close"
+                    : lastDevice == Device.Keyboard ? "Arrow keys: choose and change.   Enter: select.   " + OpenKey + ", Esc or Backspace: close"
+                    : "Up and down: choose.   Left and right: change.   A: select.   B: close");
+            }
             var problem = Problem != null ? Problem() : null;
             if ((problem != null) != shownProblem)
             {
@@ -230,27 +247,59 @@ namespace OriVR
 
         static float RowY(int row) { return 2.18f - row * 0.35f; }
 
+        // The menu reads the game's pad functions too; PadBridge lets those reads through while it holds the game off.
         void Update()
         {
-            if (XboxLiveController.Instance == null) return;  // the game's pad system does not exist yet during boot
-            bool both = XboxControllerInput.GetButton(XboxControllerInput.Button.LeftStick)
-                     && XboxControllerInput.GetButton(XboxControllerInput.Button.RightStick);
-            if (both && !bothWas)
+            PadBridge.MenuReading = true;
+            try { Tick(); }
+            finally { PadBridge.MenuReading = false; }
+        }
+
+        void Tick()
+        {
+            int ps = Rig != null ? Rig.PadButtons : 0;
+            if (Time.realtimeSinceStartup >= nextPadCheck)
             {
+                nextPadCheck = Time.realtimeSinceStartup + 1f;
+                int kind = Rig != null ? Rig.PadKind : 0;
+                if (kind != lastPadKind)
+                {
+                    if (lastPadKind >= 0 || kind != 0)
+                        Plugin.Log.LogInfo(kind == 0 ? "PAD no PlayStation pad read directly" : "PAD " + (kind == 2 ? "DualSense" : "DualShock 4") + " ready for the mod menu: both sticks open it, Cross selects, Circle closes");
+                    lastPadKind = kind;
+                }
+            }
+            // The game's pad system does not exist yet during boot. With only a PlayStation pad, the game's own joystick
+            // mapping would read its buttons in the wrong places, so the menu reads that pad directly instead.
+            bool xboxReady = XboxLiveController.Instance != null && !PadBridge.PsOnly;
+            bool xboxBoth = xboxReady && XboxControllerInput.GetButton(XboxControllerInput.Button.LeftStick)
+                                      && XboxControllerInput.GetButton(XboxControllerInput.Button.RightStick);
+            bool psBoth = (ps & PsL3) != 0 && (ps & PsR3) != 0;
+            bool both = xboxBoth || psBoth;
+            bool key = Input.GetKeyDown(OpenKey);
+            if ((both && !bothWas) || key)
+            {
+                lastDevice = key ? Device.Keyboard : psBoth ? Device.PlayStation : Device.Xbox;
                 if (IsOpen) Close();
                 else Open();
+                bothWas = both;
+                return;
             }
             bothWas = both;
 
             if (waitRelease)
             {
-                bool anyHeld = both || XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonA)
+                bool anyHeld = both || (ps & (PsCross | PsCircle | PsL3 | PsR3)) != 0
+                                    || Input.GetKey(KeyCode.Return) || Input.GetKey(KeyCode.KeypadEnter) || Input.GetKey(KeyCode.Backspace) || Input.GetKey(KeyCode.Escape) || Input.GetKey(OpenKey)
+                                    || Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow)
+                                    || (xboxReady && (XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonA)
                                     || XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonB)
                                     || XboxControllerInput.GetButton(XboxControllerInput.Button.LeftStick)
-                                    || XboxControllerInput.GetButton(XboxControllerInput.Button.RightStick);
+                                    || XboxControllerInput.GetButton(XboxControllerInput.Button.RightStick)));
                 if (!anyHeld)
                 {
                     waitRelease = false;
+                    PadBridge.BlockGame = false;
                     Time.timeScale = savedScale;
                 }
                 return;
@@ -262,15 +311,34 @@ namespace OriVR
                 Refresh();
             }
 
-            bool a = XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonA);
-            bool b = XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonB);
+            bool xa = xboxReady && XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonA);
+            bool xb = xboxReady && XboxControllerInput.GetButton(XboxControllerInput.Button.ButtonB);
+            bool pa = (ps & PsCross) != 0, pb = (ps & PsCircle) != 0;
+            bool ka = Input.GetKey(KeyCode.Return) || Input.GetKey(KeyCode.KeypadEnter), kb = Input.GetKey(KeyCode.Backspace) || Input.GetKey(KeyCode.Escape);
+            bool a = xa || pa || ka;
+            bool b = xb || pb || kb;
+            if ((a && !aWas) || (b && !bWas)) lastDevice = (pa || pb) ? Device.PlayStation : (ka || kb) ? Device.Keyboard : Device.Xbox;
             if (b && !bWas) { bWas = true; aWas = a; Close(); return; }
             if (a && !aWas) Activate(selected);
             aWas = a;
             bWas = b;
 
-            int y = Direction(XboxControllerInput.Axis.LeftStickY, XboxControllerInput.Axis.DpadY);
-            int x = Direction(XboxControllerInput.Axis.LeftStickX, XboxControllerInput.Axis.DpadX);
+            int y = xboxReady ? Direction(XboxControllerInput.Axis.LeftStickY, XboxControllerInput.Axis.DpadY) : 0;
+            int x = xboxReady ? Direction(XboxControllerInput.Axis.LeftStickX, XboxControllerInput.Axis.DpadX) : 0;
+            if (y == 0 && x == 0 && (ps & PsConnected) != 0)
+            {
+                int stick = Rig.PadStick, sx = (stick & 0xff) - 128, sy = ((stick >> 8) & 0xff) - 128;
+                y = (ps & PsUp) != 0 || sy < -64 ? 1 : (ps & PsDown) != 0 || sy > 64 ? -1 : 0;
+                x = (ps & PsRight) != 0 || sx > 64 ? 1 : (ps & PsLeft) != 0 || sx < -64 ? -1 : 0;
+                if (x != 0 || y != 0) lastDevice = Device.PlayStation;
+            }
+            if (y == 0 && x == 0)
+            {
+                y = Input.GetKey(KeyCode.UpArrow) ? 1 : Input.GetKey(KeyCode.DownArrow) ? -1 : 0;
+                x = Input.GetKey(KeyCode.RightArrow) ? 1 : Input.GetKey(KeyCode.LeftArrow) ? -1 : 0;
+                if (x != 0 || y != 0) lastDevice = Device.Keyboard;
+            }
+            else if (lastDevice == Device.Keyboard && (ps & (PsUp | PsDown | PsLeft | PsRight)) == 0) lastDevice = Device.Xbox;
             float now = Time.realtimeSinceStartup;
             if (y != heldY || x != heldX)
             {

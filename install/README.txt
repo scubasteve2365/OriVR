@@ -17,7 +17,7 @@ Play
 3. Load a save. A stage floats in front of you.
 
 Settings
-Click both sticks at once to open the menu. The game pauses while it is open.
+Click both sticks at once to open the menu (Xbox pad, or a PlayStation DualSense or DualShock 4), or press Insert on the keyboard. The game pauses while it is open and gets no input. Keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes.
 Up and down choose a setting. Left and right change it. A selects. B closes.
 - Stage distance and Stage size: where the stage sits and how big it is.
 - Depth: how strong the 3D is. Higher makes the world feel smaller and deeper. If your eyes strain on far backgrounds, lower it.
@@ -52,5 +52,5 @@ Notes
 - The mod stops the game's telemetry.
 - Settings are saved in BepInEx\config\com.scubasteve2365.orivr.cfg in the game folder.
 
-Version 1.2.1. Credits and licences are in THIRD-PARTY-NOTICES.txt. OriVR is MIT licensed, by scubasteve2365.
+Version 1.2.2. Credits and licences are in THIRD-PARTY-NOTICES.txt. OriVR is MIT licensed, by scubasteve2365.
 This is a fan mod, not made or approved by Moon Studios or Xbox Game Studios.
