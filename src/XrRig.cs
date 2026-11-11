@@ -89,6 +89,12 @@ namespace OriVR
         internal float Sharpen = 0.3f;       // strength of the sharpen pass, 0 is off
         internal bool StereoFixes = true;    // lab switch: the second-eye fixes below
         internal bool MatchRefresh = true;   // run one game tick per headset frame
+        // Frame catch-up: a frame that comes late may run up to this many ticks, so lost time is made up and game speed
+        // holds when frames arrive below the headset rate or unevenly (Virtual Desktop at 90 Hz: 75 to 89 a second, the
+        // game at 0.78 to 0.97 of normal speed, 2026-11-10). Off: at most one tick per frame, the game slows instead.
+        internal bool CatchUp = true;
+        const int CatchUpTicks = 3;
+        float StepLimit(float period) { return CatchUp ? period * CatchUpTicks : period; }
         // How the stage reaches the headset. Steady draws it into each eye's full view (one projection layer). Floating
         // Panel hands it to the runtime as one quad layer per eye, which Virtual Desktop squashes and shears when the head
         // moves. Auto chooses by OpenXR runtime.
@@ -358,6 +364,7 @@ namespace OriVR
         }
 
         bool loggedStepRestore;
+        bool loggedCatchUp = true;
 
         void MatchTick(float periodMs)
         {
@@ -365,12 +372,22 @@ namespace OriVR
             float period = periodMs / 1000f;
             if (Mathf.Abs(Time.fixedDeltaTime - period) < 0.00002f)
             {
-                // The game's PhysicsLimitTest sets its own step limit (1/60 or 1/30) now and then. Keep one tick per frame.
-                if (Mathf.Abs(Time.maximumDeltaTime - period) > 0.00002f)
+                // The game's PhysicsLimitTest sets its own step limit (1/60 or 1/30) now and then; the Frame catch-up setting
+                // can change too. Keep the mod's limit.
+                float limit = StepLimit(period);
+                if (Mathf.Abs(Time.maximumDeltaTime - limit) > 0.00002f)
                 {
-                    if (!loggedStepRestore) Plugin.Log.LogInfo(string.Format("STEP the game set its step limit to {0:F2} ms, set back to {1:F2} ms (logged once)", Time.maximumDeltaTime * 1000f, periodMs));
-                    loggedStepRestore = true;
-                    Time.maximumDeltaTime = period;
+                    if (CatchUp != loggedCatchUp)
+                    {
+                        loggedCatchUp = CatchUp;
+                        Plugin.Log.LogInfo(CatchUp ? "CATCHUP on: a late frame runs up to " + CatchUpTicks + " game ticks, so game speed holds" : "CATCHUP off: one game tick per frame at most, missed frames slow the game");
+                    }
+                    else
+                    {
+                        if (!loggedStepRestore) Plugin.Log.LogInfo(string.Format("STEP the game set its step limit to {0:F2} ms, set back to {1:F2} ms (logged once)", Time.maximumDeltaTime * 1000f, limit * 1000f));
+                        loggedStepRestore = true;
+                    }
+                    Time.maximumDeltaTime = limit;
                 }
                 return;
             }
@@ -380,8 +397,10 @@ namespace OriVR
                 savedMax = Time.maximumDeltaTime;
             }
             Time.fixedDeltaTime = period;
-            Time.maximumDeltaTime = period;
-            Plugin.Log.LogInfo(string.Format("REFRESH headset {0:F2} Hz, one game tick per frame", 1f / period));
+            Time.maximumDeltaTime = StepLimit(period);
+            loggedCatchUp = CatchUp;
+            Plugin.Log.LogInfo(string.Format("REFRESH headset {0:F2} Hz, one game tick per headset frame, frame catch-up {1}", 1f / period,
+                CatchUp ? "on (up to " + CatchUpTicks + " ticks for a late frame)" : "off"));
         }
 
         void TakeView(FrameInfo info)

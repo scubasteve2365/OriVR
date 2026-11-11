@@ -41,6 +41,7 @@ PlayStation pads: a DualSense, DualSense Edge or DualShock 4 works in the game t
 | Resolution | 100% matches your headset. Higher costs speed and adds little in this game |
 | Picture | Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head |
 | Surround | What you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black |
+| Frame catch-up | On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. Off: the game slows down a little whenever frames are missed, as the original game does |
 | Recenter | Puts the stage in front of you again |
 
 If far backgrounds strain your eyes, lower Depth or raise Pop-out.
