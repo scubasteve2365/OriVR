@@ -655,6 +655,12 @@ static std::string FindSteamVr32() {
     return "";
 }
 
+// Add-ons kept for this game, in case OpenXR fails with -32 and they have to be switched off after all.
+static std::vector<std::string> g_keptOffSwitches;  // their disable_environment variables
+static std::string g_keptNames;                     // names with an off switch
+static std::string g_stuckNames;                    // names without one
+static char g_failedLayers[512];                    // for the menu when VR did not start
+
 static void CheckLayers(HKEY root, const char* rootName) {
     HKEY key;
     if (RegOpenKeyExA(root, "SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit", 0, KEY_READ, &key) != ERROR_SUCCESS) return;
@@ -673,7 +679,13 @@ static void CheckLayers(HKEY root, const char* rootName) {
         unsigned short machine = full.empty() ? 0 : DllMachine(full);
         const char* kind = machine == 0x14c ? "32-bit" : machine == 0x8664 ? "64-bit" : machine == 0 ? "unreadable" : "other";
         if (machine == 0x14c) {
-            Log("OpenXR layer %s (%s): 32-bit, kept", name.c_str(), rootName);
+            Log("OpenXR layer %s (%s): 32-bit, kept. %s", name.c_str(), rootName, full.c_str());
+            if (!off.empty()) {
+                g_keptOffSwitches.push_back(off);
+                g_keptNames += (g_keptNames.empty() ? "" : ", ") + name;
+            } else {
+                g_stuckNames += (g_stuckNames.empty() ? "" : ", ") + name;
+            }
         } else if (!off.empty()) {
             SetEnvironmentVariableA(off.c_str(), "1");
             Log("OpenXR layer %s (%s): DLL is %s, switched off for this game (%s=1). %s", name.c_str(), rootName, kind, off.c_str(), full.c_str());
@@ -690,6 +702,10 @@ static bool StartXr() {
     strcat_s(path, "openxr_loader.dll");
     g_lastXrError = 0;
     // A 32-bit program reads the 32-bit view of HKLM. HKCU\Software is shared by both.
+    g_keptOffSwitches.clear();
+    g_keptNames.clear();
+    g_stuckNames.clear();
+    g_failedLayers[0] = 0;
     CheckLayers(HKEY_LOCAL_MACHINE, "HKLM");
     CheckLayers(HKEY_CURRENT_USER, "HKCU");
     std::string active = ActiveRuntimeManifest();
@@ -743,6 +759,23 @@ static bool StartXr() {
             Log("OpenXR runtime unavailable, using SteamVR for this game only: %s", steam.c_str());
             SetEnvironmentVariableA("XR_RUNTIME_JSON", steam.c_str());
             created = createInstance(&ici, &g_inst);
+        }
+    }
+    if (created == XR_ERROR_FILE_ACCESS_ERROR) {
+        // -32: the loader could not load an add-on (API layer). A 32-bit add-on can still refuse to load into this game
+        // (ReShade's did for a player, 2026-11-10). Try again with every add-on that has an off switch switched off, for
+        // this game only. Nothing in Windows changes and the add-ons keep working in other programs.
+        if (!g_keptOffSwitches.empty()) {
+            Log("OpenXR could not load an add-on (-32). Trying again with these add-ons switched off for this game only: %s", g_keptNames.c_str());
+            for (auto& v : g_keptOffSwitches) SetEnvironmentVariableA(v.c_str(), "1");
+            created = createInstance(&ici, &g_inst);
+            if (XR_SUCCEEDED(created)) Log("OpenXR started with those add-ons switched off");
+            else Log("still failing with those add-ons switched off: %d", (int)created);
+        }
+        if (XR_FAILED(created)) {
+            std::string names = g_keptNames + (g_keptNames.empty() || g_stuckNames.empty() ? "" : ", ") + g_stuckNames;
+            strncpy_s(g_failedLayers, names.c_str(), _TRUNCATE);
+            if (!g_stuckNames.empty()) Log("add-ons without an off switch, which the mod cannot skip: %s", g_stuckNames.c_str());
         }
     }
     XRCHECK(created);
@@ -1196,6 +1229,7 @@ API int OriPad_ParseTest(int kind, const unsigned char* report, int length) {
 
 API void OriXR_SetSurround(int mode) { g_surround = mode; }
 API int OriXR_CanSeeThrough() { return (g_canAlphaBlend || g_canAdditive) ? 1 : 0; }
+API void OriXR_FailedLayers(char* out, int size) { strncpy_s(out, size, g_failedLayers, _TRUNCATE); }
 API int OriXR_LastError() { return (int)g_lastXrError; }
 // Lab test only: name a runtime manifest ("" removes the override), and allow or block the SteamVR fallback.
 API void OriXR_TestRuntime(const char* manifest, int noFallback) {

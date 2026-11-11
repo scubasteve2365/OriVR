@@ -44,6 +44,7 @@ namespace OriVR
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void StatsFn(out uint frames, out uint layers, out uint skipped);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void SetLayerModeFn(int mode);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int LastErrorFn();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void FailedLayersFn(StringBuilder text, int size);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void VoidFn();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ParseTestFn(int kind, byte[] report, int length);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void TestRuntimeFn([MarshalAs(UnmanagedType.LPStr)] string manifest, int noFallback);
@@ -65,6 +66,7 @@ namespace OriVR
         ActiveLayerFn OriXR_ActiveLayer;
         RuntimeInfoFn OriXR_RuntimeInfo;
         LastErrorFn OriXR_LastError;
+        FailedLayersFn OriXR_FailedLayers;
         SetLayerModeFn OriXR_SetSurround;
         ActiveLayerFn OriXR_CanSeeThrough;
         TestRuntimeFn OriXR_TestRuntime;
@@ -178,6 +180,7 @@ namespace OriVR
             OriXR_ActiveLayer = Fn<ActiveLayerFn>(module, "OriXR_ActiveLayer");
             OriXR_RuntimeInfo = Fn<RuntimeInfoFn>(module, "OriXR_RuntimeInfo");
             OriXR_LastError = Fn<LastErrorFn>(module, "OriXR_LastError");
+            OriXR_FailedLayers = Fn<FailedLayersFn>(module, "OriXR_FailedLayers");
             OriXR_SetSurround = Fn<SetLayerModeFn>(module, "OriXR_SetSurround");
             OriXR_CanSeeThrough = Fn<ActiveLayerFn>(module, "OriXR_CanSeeThrough");
             OriXR_TestRuntime = Fn<TestRuntimeFn>(module, "OriXR_TestRuntime");
@@ -261,9 +264,12 @@ namespace OriVR
         // Set when VR failed to start, so the menu can say why instead of the game just being flat.
         internal string StartProblem;
 
-        static string DescribeStartFailure(int error)
+        static string DescribeStartFailure(int error, string layers)
         {
             const string log = " Details are in BepInEx\\LogOutput.log.";
+            if (error == -32)
+                return "The game is flat because an OpenXR add-on could not load in this 32-bit game (error -32)" + (layers.Length > 0 ? ": " + layers : "")
+                     + ". Switch that add-on off for VR games, for example with the free OpenXR API Layers tool, and restart the game." + log;
             if (error == -51)
                 return "The game is flat because no usable 32-bit OpenXR runtime was found (error -51). Update SteamVR, then in SteamVR Settings, under OpenXR, set SteamVR as the OpenXR runtime, and restart the game." + log;
             return "The game is flat because OpenXR could not start" + (error != 0 ? " (error " + error + ")" : "") + ". Check your headset is on and its VR software is running, then restart the game." + log;
@@ -449,7 +455,12 @@ namespace OriVR
                 }
                 if (state == 3)
                 {
-                    if (renderedPairs == 0) StartProblem = DescribeStartFailure(OriXR_LastError());
+                    if (renderedPairs == 0)
+                    {
+                        var layers = new StringBuilder(512);
+                        OriXR_FailedLayers(layers, layers.Capacity);
+                        StartProblem = DescribeStartFailure(OriXR_LastError(), layers.ToString());
+                    }
                     End();
                     yield break;
                 }
