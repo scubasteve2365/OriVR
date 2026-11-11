@@ -343,14 +343,33 @@ static bool CreateSwapchains() {
 // The hardware interpolates the texture coordinates with perspective, so the picture lies flat on the stage.
 static const char* g_stageShader = R"(
 Texture2D src : register(t0);
+Texture2D local : register(t1);   // the ambient colour history: the blurred surroundings of each point
 SamplerState linearClamp : register(s0);
-cbuffer Stage : register(b0) { float4 corner[4]; };
+// os: overscan factor (the image covers os.x times the stage), background fade (in stage widths), effect strength,
+// stage height / width. fx: how far effects carry (stage widths), how much brighter than their surroundings a thing
+// must be to count as an effect. With os.x 1 every pixel is opaque, as before.
+cbuffer Stage : register(b0) { float4 corner[4]; float4 os; float4 fx; };
 void vs(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
     uv = float2(id & 1, id >> 1);
     pos = corner[id];
 }
 float4 ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    return float4(src.Sample(linearClamp, uv).rgb, 1);
+    float3 c = src.Sample(linearClamp, uv).rgb;
+    // Outside the stage (the overscan border), the scene fades out. Dark background fades within the fade reach;
+    // bright things (light, sparks, effects) carry further out, so they seem to escape the screen.
+    float2 q = (uv - 0.5) * os.x;
+    float2 o2 = max(abs(q) - 0.5, 0) * float2(1, os.w);
+    float d = length(o2);
+    float fade = max(os.y, 0.001);
+    float aBg = 1 - smoothstep(0, fade, d);
+    if (d <= 0) return float4(c, 1);
+    // Effects: what stands out from its surroundings (sparks, embers, spirit light, flashes), not what is merely bright,
+    // so a bright lava cave does not spill as a whole.
+    float3 around = local.SampleLevel(linearClamp, uv, 1).rgb;
+    float lum = dot(c, float3(0.299, 0.587, 0.114)), lumAround = dot(around, float3(0.299, 0.587, 0.114));
+    float stand = lum - lumAround * 1.1;
+    float aFx = (1 - smoothstep(0, max(fx.x, 0.001), d)) * smoothstep(fx.y, fx.y + 0.25, stand) * os.z;
+    return float4(c, saturate(max(aBg, aFx)));
 }
 )";
 
@@ -367,7 +386,7 @@ static bool CreateStagePass() {
     g_dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_stageVs);
     g_dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_stagePs);
     D3D11_BUFFER_DESC cb{};
-    cb.ByteWidth = 64;
+    cb.ByteWidth = 96;
     cb.Usage = D3D11_USAGE_DEFAULT;
     cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     g_dev->CreateBuffer(&cb, nullptr, &g_stageCb);
@@ -407,6 +426,270 @@ static bool CreateProjectionSwapchains() {
     return true;
 }
 
+struct V3 { float x, y, z; };
+static V3 Rotate(const XrQuaternionf& q, V3 v) {
+    // v + w t + u x t, with t = 2 (u x v) and u = (x, y, z)
+    V3 t{2 * (q.y * v.z - q.z * v.y), 2 * (q.z * v.x - q.x * v.z), 2 * (q.x * v.y - q.y * v.x)};
+    return {v.x + q.w * t.x + (q.y * t.z - q.z * t.y), v.y + q.w * t.y + (q.z * t.x - q.x * t.z), v.z + q.w * t.z + (q.x * t.y - q.y * t.x)};
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Ambient surround (Surround 3): an Ambilight-style glow on a wall just behind the stage.
+// Once per frame, eye 0's image is shrunk to 256x144, mipmapped down, and blended into a 32x18 history of colours
+// (the "LEDs"), smoothed over time like Hyperion does. Each eye then draws one big quad around the stage that reads the
+// history at the nearest stage edge and fades out with distance. Everything stays in the game's gamma-space bytes.
+// ---------------------------------------------------------------------------------------------------------------
+static const char* g_ambShader = R"(
+Texture2D src : register(t0);
+Texture2D slow : register(t1);   // the same colours, followed slowly (about 1.5 s): what the eye has got used to
+SamplerState linearClamp : register(s0);
+// tanLRUD: the eye's lens. eyeW: eye position in stage space (stage centre at 0, x right, y up, +z toward the viewer)
+// and stage width. r0H, r1, r2: rows of the eye-to-stage rotation, and stage height. p0: spread, strength, fill, behind.
+// p1: history blend, 1/viewport width, 1/viewport height, overscan. p2: react (how strongly brightness changes punch).
+cbuffer Amb : register(b1) { float4 tanLRUD; float4 eyeW; float4 r0H; float4 r1; float4 r2; float4 p0; float4 p1; float4 p2; };
+// Flashes flare and fades dim: the light now against what it has been lately, at the same place and blur.
+float gainAt(float3 now, float3 lately) {
+    float a = dot(now, float3(0.299, 0.587, 0.114)), b = dot(lately, float3(0.299, 0.587, 0.114));
+    return clamp(1 + p2.x * (a - b) / (b + 0.06), 0.25, 3.5);
+}
+void vsFull(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
+    uv = float2((id << 1) & 2, id & 2);
+    pos = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+float4 psCopy(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return float4(src.Sample(linearClamp, uv).rgb, 1);
+}
+// 256x144 at mip 3 is 32x18: each history texel is the average of one block of the picture.
+float4 psAccum(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return float4(src.SampleLevel(linearClamp, uv, 3).rgb, p1.x);
+}
+float hash(float2 p) { return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
+float3 saturateMore(float3 c, float s) { float l = dot(c, float3(0.299, 0.587, 0.114)); return max(lerp(l.xxx, c, s), 0); }
+// Full-view pass, one per eye. Each pixel follows its line of sight into the room. Where it meets the big wall behind
+// the stage, it takes the light of the nearest stage edge, spreading far beyond what real LEDs could reach. Everywhere
+// (also to the sides and behind you) the room is filled with the scene's average colour, strongest toward the stage.
+float4 psGlow(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float W = eyeW.w, H = r0H.w, spread = p0.x, strength = p0.y, fill = p0.z, behind = p0.w;
+    float2 s = pos.xy * p1.yz;                                       // 0..1 across the eye's view, y down
+    float3 dEye = float3(lerp(tanLRUD.x, tanLRUD.y, s.x), lerp(tanLRUD.z, tanLRUD.w, s.y), -1);
+    float3 dir = normalize(float3(dot(r0H.xyz, dEye), dot(r1.xyz, dEye), dot(r2.xyz, dEye)));
+    float3 o = eyeW.xyz;
+
+    float3 glow = 0;
+    if (dir.z < -0.0001) {
+        float t = (-behind - o.z) / dir.z;
+        float2 p = o.xy + dir.xy * t;                                // where the sight line meets the wall, metres
+        float2 out2 = max(abs(p) - float2(W, H) * 0.5, 0);           // metres outside the stage edge
+        float d = length(out2);
+        float2 suv = float2(p.x / W + 0.5, 0.5 - p.y / H);
+        // The image covers more than the stage; colours come from just outside the stage edge, not from the far edge
+        // of the overscan border, which can show past the end of the level.
+        float inner = 0.5 / max(p1.w, 1) * 1.12;
+        float2 c = clamp((suv - 0.5) / max(p1.w, 1) + 0.5, max(0.5 - inner, 0.02), min(0.5 + inner, 0.98));
+        // Further out, the colour comes from a blurrier copy of the history (a higher mip), so colours blend smoothly
+        // into large soft clouds instead of streaks.
+        float lod = log2(1 + d / max(spread * 0.15, 0.001));
+        float3 col = src.SampleLevel(linearClamp, c, lod).rgb;
+        col *= gainAt(col, slow.SampleLevel(linearClamp, c, lod).rgb);
+        // A bright core near the edge and a long soft tail that reaches far into the room.
+        float fall = 0.65 * exp(-d / max(spread * 0.35, 0.01)) + 0.35 * exp(-d / max(spread * 2.5, 0.01));
+        glow = saturateMore(col, 1.4) * strength * fall;
+    }
+    float3 avgNow = src.SampleLevel(linearClamp, float2(0.5, 0.5), 8).rgb;
+    float3 avg = saturateMore(avgNow, 1.5) * gainAt(avgNow, slow.SampleLevel(linearClamp, float2(0.5, 0.5), 8).rgb);
+    float facing = saturate(dot(dir, normalize(-o)));                // 1 looking at the stage, 0 at right angles or behind
+    float3 room = avg * fill * lerp(0.25, 1.0, facing * facing);
+    // Flash: what got brighter in the whole picture just now, against the last second or two, lights the whole room
+    // in its colour, strongest toward the stage, like a camera flash in front of you.
+    float3 flash = max(avgNow - slow.SampleLevel(linearClamp, float2(0.5, 0.5), 8).rgb, 0) * p2.y;
+    flash = saturateMore(flash, 1.3) * lerp(0.45, 1.0, facing);
+    float3 c3 = glow + room * (1 - saturate(dot(glow, 0.333))) + flash;
+    c3 += (hash(pos.xy) - 0.5) / 255.0;                              // dither, so the dark gradients do not band
+    return float4(saturate(c3), 1);
+}
+)";
+
+static ID3D11VertexShader* g_ambVsFull;
+static ID3D11PixelShader *g_ambPsCopy, *g_ambPsAccum, *g_ambPsGlow;
+static ID3D11Texture2D *g_ambSmall, *g_ambHist, *g_ambSlow;
+static ID3D11ShaderResourceView *g_ambSmallSrv, *g_ambHistSrv, *g_ambSlowSrv;
+static ID3D11RenderTargetView *g_ambSmallRtv, *g_ambHistRtv, *g_ambSlowRtv;
+static volatile float g_ambReact = 1.2f, g_ambSlowTime = 1.5f, g_ambFlash = 6.0f;
+static ID3D11Buffer* g_ambCb;
+static ID3D11BlendState* g_ambBlend;
+static int g_ambState;                 // 0 not tried, 1 ready, -1 failed
+static bool g_ambPrimed, g_ambPrimed2;  // the fast and slow histories hold a real frame
+static volatile float g_overscan = 1.0f, g_osFade = 0.04f, g_osEffects = 1.0f, g_osReach = 0.35f, g_osThreshold = 0.06f;  // used only with Ambient
+static volatile float g_ambStrength = 1.2f, g_ambSpread = 1.0f, g_ambFill = 0.35f, g_ambBehind = 0.3f, g_ambSmooth = 0.10f;
+static const int AmbSmallW = 256, AmbSmallH = 144, AmbHistW = 32, AmbHistH = 18;
+
+static bool CreateAmbient() {
+    if (g_ambState) return g_ambState == 1;
+    g_ambState = -1;
+    if (!g_compile || !g_passState) { Log("ambient off: no shader compiler or context state"); return false; }
+    ID3DBlob *vsB = nullptr, *pc = nullptr, *pa = nullptr, *pg = nullptr, *err = nullptr;
+    size_t len = strlen(g_ambShader);
+    if (FAILED(g_compile(g_ambShader, len, "ambient", nullptr, nullptr, "vsFull", "vs_5_0", 0, 0, &vsB, &err)) ||
+        FAILED(g_compile(g_ambShader, len, "ambient", nullptr, nullptr, "psCopy", "ps_5_0", 0, 0, &pc, &err)) ||
+        FAILED(g_compile(g_ambShader, len, "ambient", nullptr, nullptr, "psAccum", "ps_5_0", 0, 0, &pa, &err)) ||
+        FAILED(g_compile(g_ambShader, len, "ambient", nullptr, nullptr, "psGlow", "ps_5_0", 0, 0, &pg, &err))) {
+        Log("ambient off: shader error %s", err ? (const char*)err->GetBufferPointer() : "unknown");
+        return false;
+    }
+    g_dev->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &g_ambVsFull);
+    g_dev->CreatePixelShader(pc->GetBufferPointer(), pc->GetBufferSize(), nullptr, &g_ambPsCopy);
+    g_dev->CreatePixelShader(pa->GetBufferPointer(), pa->GetBufferSize(), nullptr, &g_ambPsAccum);
+    g_dev->CreatePixelShader(pg->GetBufferPointer(), pg->GetBufferSize(), nullptr, &g_ambPsGlow);
+    vsB->Release(); pc->Release(); pa->Release(); pg->Release();
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = AmbSmallW; td.Height = AmbSmallH;
+    td.MipLevels = 0;  // full chain, for GenerateMips
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_ambSmall))) { Log("ambient off: no small texture"); return false; }
+    g_dev->CreateShaderResourceView(g_ambSmall, nullptr, &g_ambSmallSrv);
+    D3D11_RENDER_TARGET_VIEW_DESC rv{};
+    rv.Format = td.Format;
+    rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    g_dev->CreateRenderTargetView(g_ambSmall, &rv, &g_ambSmallRtv);
+
+    td.Width = AmbHistW; td.Height = AmbHistH;
+    td.MipLevels = 0;  // full chain: the last mip is the whole scene's average, for the room fill
+    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;  // small changes still add up when smoothing slowly
+    td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_ambHist))) { Log("ambient off: no history texture"); return false; }
+    g_dev->CreateShaderResourceView(g_ambHist, nullptr, &g_ambHistSrv);
+    D3D11_RENDER_TARGET_VIEW_DESC hrv{};
+    hrv.Format = td.Format;
+    hrv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    g_dev->CreateRenderTargetView(g_ambHist, &hrv, &g_ambHistRtv);
+    if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_ambSlow))) { Log("ambient off: no slow history texture"); return false; }
+    g_dev->CreateShaderResourceView(g_ambSlow, nullptr, &g_ambSlowSrv);
+    g_dev->CreateRenderTargetView(g_ambSlow, &hrv, &g_ambSlowRtv);
+
+    D3D11_BUFFER_DESC cb{};
+    cb.ByteWidth = 128;
+    cb.Usage = D3D11_USAGE_DEFAULT;
+    cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    g_dev->CreateBuffer(&cb, nullptr, &g_ambCb);
+
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable = TRUE;
+    bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    g_dev->CreateBlendState(&bd, &g_ambBlend);
+
+    bool ok = g_ambVsFull && g_ambPsCopy && g_ambPsAccum && g_ambPsGlow && g_ambSmallSrv && g_ambSmallRtv && g_ambHistSrv && g_ambHistRtv && g_ambSlowSrv && g_ambSlowRtv && g_ambCb && g_ambBlend;
+    g_ambState = ok ? 1 : -1;
+    Log(ok ? "ambient ready: %dx%d colour history" : "ambient off: could not make its resources", AmbHistW, AmbHistH);
+    return ok;
+}
+
+// Runs inside the private context state. Reads this frame's eye image and moves the colour history toward it.
+static void UpdateAmbient(ID3D11ShaderResourceView* srcSrv, XrDuration period) {
+    float dt = period > 0 ? (float)period / 1e9f : 1.0f / 90.0f;
+    float blend = g_ambPrimed ? 1.0f - expf(-dt / (g_ambSmooth > 0.001f ? g_ambSmooth : 0.001f)) : 1.0f;
+    g_ambPrimed = true;
+    float slowBlend = g_ambPrimed2 ? 1.0f - expf(-dt / (g_ambSlowTime > 0.01f ? g_ambSlowTime : 0.01f)) : 1.0f;
+    g_ambPrimed2 = true;
+    float cbData[32] = {};
+    cbData[24] = blend;
+    g_ctx->UpdateSubresource(g_ambCb, 0, nullptr, cbData, 0, 0);
+    ID3D11ShaderResourceView* noSrv = nullptr;
+
+    // 1. Shrink the picture.
+    D3D11_VIEWPORT vp{0, 0, (float)AmbSmallW, (float)AmbSmallH, 0, 1};
+    g_ctx->RSSetViewports(1, &vp);
+    g_ctx->RSSetState(g_noCull);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    g_ctx->OMSetDepthStencilState(nullptr, 0);
+    g_ctx->OMSetRenderTargets(1, &g_ambSmallRtv, nullptr);
+    g_ctx->IASetInputLayout(nullptr);
+    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->VSSetShader(g_ambVsFull, nullptr, 0);
+    g_ctx->PSSetShader(g_ambPsCopy, nullptr, 0);
+    g_ctx->PSSetSamplers(0, 1, &g_linear);
+    g_ctx->PSSetShaderResources(0, 1, &srcSrv);
+    g_ctx->Draw(3, 0);
+    g_ctx->PSSetShaderResources(0, 1, &noSrv);
+    ID3D11RenderTargetView* noRtv = nullptr;
+    g_ctx->OMSetRenderTargets(1, &noRtv, nullptr);
+    g_ctx->GenerateMips(g_ambSmallSrv);
+
+    // 2. Blend the 32x18 average into the history.
+    D3D11_VIEWPORT hv{0, 0, (float)AmbHistW, (float)AmbHistH, 0, 1};
+    g_ctx->RSSetViewports(1, &hv);
+    g_ctx->OMSetBlendState(g_ambBlend, nullptr, 0xffffffff);
+    g_ctx->OMSetRenderTargets(1, &g_ambHistRtv, nullptr);
+    g_ctx->PSSetShader(g_ambPsAccum, nullptr, 0);
+    g_ctx->PSSetConstantBuffers(1, 1, &g_ambCb);
+    g_ctx->PSSetShaderResources(0, 1, &g_ambSmallSrv);
+    g_ctx->Draw(3, 0);
+    g_ctx->PSSetShaderResources(0, 1, &noSrv);
+    g_ctx->OMSetRenderTargets(1, &noRtv, nullptr);
+    g_ctx->GenerateMips(g_ambHistSrv);
+
+    // 3. The same into the slow history, which follows over about a second and a half.
+    cbData[24] = slowBlend;
+    g_ctx->UpdateSubresource(g_ambCb, 0, nullptr, cbData, 0, 0);
+    g_ctx->OMSetRenderTargets(1, &g_ambSlowRtv, nullptr);
+    g_ctx->PSSetShaderResources(0, 1, &g_ambSmallSrv);
+    g_ctx->Draw(3, 0);
+    g_ctx->PSSetShaderResources(0, 1, &noSrv);
+    g_ctx->OMSetRenderTargets(1, &noRtv, nullptr);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    g_ctx->GenerateMips(g_ambSlowSrv);
+}
+
+// Runs inside the private context state, into the eye's view target, before the stage is drawn.
+static void DrawAmbientGlow(ID3D11RenderTargetView* rtv, const XrPosef& pose, const XrFovf& fov) {
+    // The eye in stage space: stage centre at 0, x right, y up, +z toward the viewer.
+    XrQuaternionf stageInv{0, -g_stage[5], 0, g_stage[6]};
+    V3 rel{pose.position.x - g_stage[0], pose.position.y - g_stage[1], pose.position.z - g_stage[2]};
+    V3 o = Rotate(stageInv, rel);
+    // Eye-to-stage rotation as matrix rows: columns are the eye's axes turned into stage space.
+    V3 ex = Rotate(stageInv, Rotate(pose.orientation, V3{1, 0, 0}));
+    V3 ey = Rotate(stageInv, Rotate(pose.orientation, V3{0, 1, 0}));
+    V3 ez = Rotate(stageInv, Rotate(pose.orientation, V3{0, 0, 1}));
+    float cbData[32] = {
+        tanf(fov.angleLeft), tanf(fov.angleRight), tanf(fov.angleUp), tanf(fov.angleDown),
+        o.x, o.y, o.z, g_stage[3],
+        ex.x, ey.x, ez.x, g_stage[4],
+        ex.y, ey.y, ez.y, 0,
+        ex.z, ey.z, ez.z, 0,
+        g_ambSpread, g_ambStrength, g_ambFill, g_ambBehind,
+        0, 1.0f / g_projW, 1.0f / g_projH, g_surround == 3 ? g_overscan : 1.0f,
+        g_ambReact, g_ambFlash, 0, 0};
+    g_ctx->UpdateSubresource(g_ambCb, 0, nullptr, cbData, 0, 0);
+    D3D11_VIEWPORT vp{0, 0, (float)g_projW, (float)g_projH, 0, 1};
+    g_ctx->RSSetViewports(1, &vp);
+    g_ctx->RSSetState(g_noCull);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    g_ctx->OMSetDepthStencilState(nullptr, 0);
+    g_ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    g_ctx->IASetInputLayout(nullptr);
+    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->VSSetShader(g_ambVsFull, nullptr, 0);
+    g_ctx->PSSetShader(g_ambPsGlow, nullptr, 0);
+    g_ctx->PSSetConstantBuffers(1, 1, &g_ambCb);
+    g_ctx->PSSetSamplers(0, 1, &g_linear);
+    ID3D11ShaderResourceView* both[2] = {g_ambHistSrv, g_ambSlowSrv};
+    g_ctx->PSSetShaderResources(0, 2, both);
+    g_ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none[2] = {nullptr, nullptr};
+    g_ctx->PSSetShaderResources(0, 2, none);
+}
+
 static bool SeeThrough() { return g_surround == 2 && (g_canAlphaBlend || g_canAdditive); }
 static void SurroundColour(float out[4]) {
     out[0] = 0; out[1] = g_surround == 1 ? 1.0f : 0; out[2] = 0; out[3] = SeeThrough() ? 0 : 1.0f;
@@ -441,19 +724,13 @@ static bool EnsureProjection() {
     return g_projState == 1;
 }
 
-struct V3 { float x, y, z; };
-static V3 Rotate(const XrQuaternionf& q, V3 v) {
-    // v + w t + u x t, with t = 2 (u x v) and u = (x, y, z)
-    V3 t{2 * (q.y * v.z - q.z * v.y), 2 * (q.z * v.x - q.x * v.z), 2 * (q.x * v.y - q.y * v.x)};
-    return {v.x + q.w * t.x + (q.y * t.z - q.z * t.y), v.y + q.w * t.y + (q.z * t.x - q.x * t.z), v.z + q.w * t.z + (q.x * t.y - q.y * t.x)};
-}
-
 // The stage's four corners in the eye's clip space: room -> eye (inverse of the located eye pose) -> the eye's lens.
-static void StageCorners(const XrPosef& eye, const XrFovf& fov, float out[16]) {
+// sx, sy scale the rectangle about its centre; behind moves it that many metres away from the viewer.
+static void StageCornersEx(const XrPosef& eye, const XrFovf& fov, float sx, float sy, float behind, float out[16]) {
     XrQuaternionf stageTurn{0, g_stage[5], 0, g_stage[6]};
     XrQuaternionf inv{-eye.orientation.x, -eye.orientation.y, -eye.orientation.z, eye.orientation.w};
-    float hw = g_stage[3] * 0.5f, hh = g_stage[4] * 0.5f;
-    const V3 local[4] = {{-hw, hh, 0}, {hw, hh, 0}, {-hw, -hh, 0}, {hw, -hh, 0}};
+    float hw = g_stage[3] * 0.5f * sx, hh = g_stage[4] * 0.5f * sy, z = -behind;
+    const V3 local[4] = {{-hw, hh, z}, {hw, hh, z}, {-hw, -hh, z}, {hw, -hh, z}};
     float l = tanf(fov.angleLeft), r = tanf(fov.angleRight), u = tanf(fov.angleUp), d = tanf(fov.angleDown);
     const float n = 0.05f, f = 100.0f;
     for (int i = 0; i < 4; i++) {
@@ -466,6 +743,8 @@ static void StageCorners(const XrPosef& eye, const XrFovf& fov, float out[16]) {
         out[i * 4 + 3] = -v.z;
     }
 }
+
+static void StageCorners(const XrPosef& eye, const XrFovf& fov, float out[16]) { StageCornersEx(eye, fov, 1, 1, 0, out); }
 
 // Draws the eye image onto the stage inside the eye's full view and fills one projection view. The pose and lens are
 // the ones this eye image was rendered from, so the runtime's correction for late head motion matches the picture.
@@ -500,8 +779,13 @@ static bool DrawEye(int e, ID3D11Texture2D* src, const PendingFrame& f, XrCompos
     ID3D11ShaderResourceView* srv = nullptr;
     bool ok = rtv && SUCCEEDED(g_dev->CreateShaderResourceView(image, &sv, &srv));
     if (ok) {
-        float corners[16];
-        StageCorners(f.pose[e], f.fov[e], corners);
+        // With Ambient, the eye image may cover more than the stage (overscan); it is drawn that much bigger, blended.
+        bool overscan = g_surround == 3 && g_overscan > 1.001f && CreateAmbient();
+        float k = overscan ? g_overscan : 1.0f;
+        float corners[24];
+        StageCornersEx(f.pose[e], f.fov[e], k, k, 0, corners);
+        corners[16] = k; corners[17] = g_osFade; corners[18] = g_osEffects; corners[19] = g_stage[4] / g_stage[3];
+        corners[20] = g_osReach; corners[21] = g_osThreshold; corners[22] = 0; corners[23] = 0;
         ID3DDeviceContextState* unityState = nullptr;
         g_ctx1->SwapDeviceContextState(g_passState, &unityState);
         // Every piece of state is set here: the private state keeps whatever the last pass left in it.
@@ -510,24 +794,31 @@ static bool DrawEye(int e, ID3D11Texture2D* src, const PendingFrame& f, XrCompos
         float surround[4];
         SurroundColour(surround);
         g_ctx->ClearRenderTargetView(rtv, surround);
+        // Ambient: the colour history moves on once per frame, from the left eye's image, so both eyes see the same glow.
+        if (g_surround == 3 && CreateAmbient()) {
+            if (e == 0) UpdateAmbient(srv, f.period);
+            DrawAmbientGlow(rtv, f.pose[e], f.fov[e]);
+        }
         g_ctx->UpdateSubresource(g_stageCb, 0, nullptr, corners, 0, 0);
         D3D11_VIEWPORT vp{0, 0, (float)g_projW, (float)g_projH, 0, 1};
         g_ctx->RSSetViewports(1, &vp);
         g_ctx->RSSetState(g_noCull);
-        g_ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+        g_ctx->OMSetBlendState(overscan ? g_ambBlend : nullptr, nullptr, 0xffffffff);
         g_ctx->OMSetDepthStencilState(nullptr, 0);
         g_ctx->OMSetRenderTargets(1, &rtv, nullptr);
         g_ctx->IASetInputLayout(nullptr);
         g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         g_ctx->VSSetShader(g_stageVs, nullptr, 0);
         g_ctx->VSSetConstantBuffers(0, 1, &g_stageCb);
+        g_ctx->PSSetConstantBuffers(0, 1, &g_stageCb);  // the pixel shader reads the overscan settings from it too
         g_ctx->PSSetShader(g_stagePs, nullptr, 0);
         g_ctx->PSSetSamplers(0, 1, &g_linear);
-        g_ctx->PSSetShaderResources(0, 1, &srv);
+        ID3D11ShaderResourceView* stageSrvs[2] = {srv, overscan ? g_ambHistSrv : nullptr};
+        g_ctx->PSSetShaderResources(0, 2, stageSrvs);
         g_ctx->Draw(4, 0);
-        ID3D11ShaderResourceView* noSrv = nullptr;
+        ID3D11ShaderResourceView* noSrvs[2] = {nullptr, nullptr};
         ID3D11RenderTargetView* noRtv = nullptr;
-        g_ctx->PSSetShaderResources(0, 1, &noSrv);
+        g_ctx->PSSetShaderResources(0, 2, noSrvs);
         g_ctx->OMSetRenderTargets(1, &noRtv, nullptr);
         g_ctx1->SwapDeviceContextState(unityState, nullptr);
         if (unityState) unityState->Release();
@@ -958,7 +1249,8 @@ static void DoSubmit() {
     XrCompositionLayerProjection backdrop{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerProjectionView bviews[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     uint32_t count = 0;
-    LONG mode = (g_layerMode && f.viewsValid && EnsureProjection()) ? 1 : 0;
+    // Ambient is drawn into the eyes' views, so it always uses the in-eye (Steady) path.
+    LONG mode = ((g_layerMode || g_surround == 3) && f.viewsValid && EnsureProjection()) ? 1 : 0;
     if (f.shouldRender) g_activeLayer = mode;
     if (f.shouldRender && mode != g_loggedMode) {
         g_loggedMode = mode;
@@ -1022,7 +1314,7 @@ static void DoSubmit() {
         : g_canAlphaBlend ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND : XR_ENVIRONMENT_BLEND_MODE_ADDITIVE;
     if (f.shouldRender && g_surround != g_loggedSurround) {
         g_loggedSurround = g_surround;
-        Log("SURROUND %s%s", g_surround == 1 ? "green" : g_surround == 2 ? "transparent" : "black",
+        Log("SURROUND %s%s", g_surround == 1 ? "green" : g_surround == 2 ? "transparent" : g_surround == 3 ? "ambient" : "black",
             g_surround == 2 && !SeeThrough() ? " asked, but the runtime offers no see-through blend mode: black used"
             : !SeeThrough() ? "" : g_canAlphaBlend ? " (alpha blend)" : " (additive)");
     }
@@ -1235,6 +1527,13 @@ API int OriPad_ParseTest(int kind, const unsigned char* report, int length) {
 }
 
 API void OriXR_SetSurround(int mode) { g_surround = mode; }
+API void OriXR_SetReact(float react, float slowTime, float flash) { g_ambReact = react; g_ambSlowTime = slowTime; g_ambFlash = flash; }
+API void OriXR_SetOverscan(float factor, float fade, float effects, float reach, float threshold) {
+    g_overscan = factor; g_osFade = fade; g_osEffects = effects; g_osReach = reach; g_osThreshold = threshold;
+}
+API void OriXR_SetAmbient(float strength, float spread, float fill, float behind, float smoothing) {
+    g_ambStrength = strength; g_ambSpread = spread; g_ambFill = fill; g_ambBehind = behind; g_ambSmooth = smoothing;
+}
 API int OriXR_CanSeeThrough() { return (g_canAlphaBlend || g_canAdditive) ? 1 : 0; }
 API void OriXR_FailedLayers(char* out, int size) { strncpy_s(out, size, g_failedLayers, _TRUNCATE); }
 API int OriXR_LastError() { return (int)g_lastXrError; }

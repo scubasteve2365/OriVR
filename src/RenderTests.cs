@@ -160,12 +160,13 @@ namespace OriVR
         // eyeX, eyeY: the eye's offset from the flat camera. eyeDist: its distance from the plane z 0. planeZ: the world
         // depth that sits exactly on the stage (the rest is in front or behind). All in game units. The picture seen from
         // the middle does not depend on planeZ, because the rectangle grows with the distance.
-        internal static Matrix4x4 EyeProjection(Camera cam, float eyeX, float eyeY, float eyeDist, float planeZ)
+        // overscan above 1 widens the view around the same centre, so more of the world shows around the stage.
+        internal static Matrix4x4 EyeProjection(Camera cam, float eyeX, float eyeY, float eyeDist, float planeZ, float overscan = 1f)
         {
             float dist = -cam.transform.position.z; // the gameplay plane is z 0
             float n = cam.nearClipPlane;
             float grow = (dist + planeZ) / dist;
-            float halfH = dist * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * grow;
+            float halfH = dist * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * grow * overscan;
             float halfW = halfH * cam.aspect;
             float scale = n / (eyeDist + planeZ);
             float l = (-halfW - eyeX) * scale, r = (halfW - eyeX) * scale;
