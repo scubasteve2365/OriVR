@@ -367,8 +367,12 @@ namespace OriVR
         bool loggedStepRestore;
         bool loggedCatchUp = true;
 
+        internal float HeadsetHz;  // last rate OpenXR reported, for the menu readout
+        internal int RecommendedWidth { get { return OriXR_RecommendedWidth != null ? OriXR_RecommendedWidth() : 0; } }
+
         void MatchTick(float periodMs)
         {
+            if (periodMs > 0f) HeadsetHz = 1000f / periodMs;
             if (!MatchRefresh || periodMs <= 0f) return;
             float period = periodMs / 1000f;
             if (Mathf.Abs(Time.fixedDeltaTime - period) < 0.00002f)

@@ -7,9 +7,9 @@ using UnityEngine;
 
 namespace OriVR
 {
-    // Build 19 (release 1.3): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
+    // Build 20 (release 1.4): OpenXR diorama with a settings menu. VR starts by itself once the game has a camera, unless VR.AutoStart is false, and if
     // OpenXR cannot start the game stays flat. Telemetry is stopped, because the lab keeps this game offline.
-    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.3.0")]
+    [BepInPlugin("com.scubasteve2365.orivr", "OriVR", "1.4.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log;
@@ -34,6 +34,10 @@ namespace OriVR
         ConfigEntry<string> picture, surround;
         ConfigEntry<bool> catchUp;
         MenuUI menu;
+        MenuSound sound;
+        ConfigEntry<int> soundLevel;
+        ConfigEntry<float> menuSize, menuHeight;
+        const string Version = "1.4";
         int ticks;
         int nextCommandCheck;
         int autoProbeFrame = 600;
@@ -78,11 +82,18 @@ namespace OriVR
             catch (Exception) { Log.LogWarning("Menu.OpenKey '" + menuKey.Value + "' is not a key name, Insert used"); }
             rig.LoadNative();  // early, so the PlayStation pad reader runs before VR starts
             PadBridge.Rig = rig;
-            menu.RowText = MenuRowText;
-            menu.RowTip = MenuRowTip;
+            soundLevel = Config.Bind("Menu", "Sounds", 2, "Menu sounds: 0 Off, 1 Low, 2 Medium, 3 High.");
+            menuSize = Config.Bind("Menu", "Size", 1f, "Size of the mod menu, 1 is normal.");
+            menuHeight = Config.Bind("Menu", "Height", 0f, "Moves the mod menu up or down on the stage, 0 is the middle.");
+            sound = gameObject.AddComponent<MenuSound>();
+            sound.Level = soundLevel.Value;
+            menu.Sound = sound;
+            menu.Size = menuSize.Value;
+            menu.Height = menuHeight.Value;
+            menu.Version = "OriVR " + Version;
             menu.Problem = () => rig.StartProblem;
-            menu.Adjust = MenuAdjust;
-            menu.Activate = MenuActivate;
+            menu.Readout = MenuReadout;
+            BuildMenu();
             menu.Closed = () => { rig.ApplyStage(); rig.UpdateResolution(); };
             rig.StageWidth = stageWidth.Value;
             rig.StageDistance = stageDistance.Value;
@@ -90,7 +101,7 @@ namespace OriVR
             rig.EyeWidth = eyeWidth.Value;
             rig.EyeHeight = eyeWidth.Value * 9 / 16;
             new Harmony("com.scubasteve2365.orivr").PatchAll(typeof(Plugin).Assembly);
-            Log.LogInfo("OriVR 1.3 (build 19) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
+            Log.LogInfo("OriVR " + Version + " (build 20) loaded. Unity " + Application.unityVersion + ", pointer size " + IntPtr.Size);
         }
 
         void FixedUpdate() { ticks++; Ticks = ticks; }
@@ -143,36 +154,134 @@ namespace OriVR
             return r;
         }
 
-        string MenuRowTip(int row)
+        // The mod menu, three tabs (mockup A, Steve 2026-11-11): Stage, Picture, Menu.
+        void BuildMenu()
         {
-            switch (row)
-            {
-                case 0: return "How far away the stage floats. Closer fills more of your view.";
-                case 1: return "How wide the stage is, in metres. Bigger fills more of your view.";
-                case 2: return "How strong the 3D is. Higher makes the world feel smaller and deeper. If far backgrounds strain your eyes, lower it or raise Pop-out.";
-                case 3: return "Brings more of the scene out toward you. It also eases far backgrounds.";
-                case 4: return "Crisper edges. Too high looks harsh. 0% turns it off.";
-                case 5: return "100% matches your headset at this stage size. Higher costs speed and adds little in this game. Applies when the menu closes.";
-                case 6:
-                    return "Auto picks for your headset software: Steady on Virtual Desktop, Floating Panel on everything else. "
-                         + "Steady draws the stage into each eye's view and stays still. "
-                         + "Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head."
-                         + (rig.RuntimeName.Length > 0 ? " Detected: " + rig.RuntimeName + "." : "");
-                case 7: return SurroundTip();
-                case 8: return "On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. "
-                             + "Off: the game slows down a little whenever frames are missed, as the original game does. Leave it On unless motion looks jumpy.";
-                case 9: return "Puts the stage straight in front of where you are looking now.";
-                case 10: return "Puts every setting on this page back to how it started.";
-                default: return "Closes this menu and goes back to the game. Clicking both sticks or pressing " + menu.OpenKey + " also opens and closes it.";
-            }
+            var stage = new MenuTab { Name = "STAGE" };
+            stage.Rows.Add(new MenuRow { Label = "Stage distance", Value = () => string.Format("{0:F2} m", stageDistance.Value),
+                Tip = () => "How far away the stage floats. Closer fills more of your view.",
+                Change = d => Set(stageDistance, stageDistance.Value + d * 0.05f, 0.5f, 10f) });
+            stage.Rows.Add(new MenuRow { Label = "Stage size", Value = () => string.Format("{0:F2} m", stageWidth.Value),
+                Tip = () => "How wide the stage is, in metres. Bigger fills more of your view.",
+                Change = d => Set(stageWidth, stageWidth.Value + d * 0.05f, 0.5f, 10f) });
+            stage.Rows.Add(new MenuRow { Label = "Depth", Value = () => string.Format("{0:F0}%", separation.Value * 100f),
+                Tip = () => "How strong the 3D is. Higher makes the world feel smaller and deeper. If far backgrounds strain your eyes, lower it or raise Pop-out.",
+                Change = d => Set(separation, separation.Value + d * 0.05f, 0f, 3f) });
+            stage.Rows.Add(new MenuRow { Label = "Pop-out", Value = () => string.Format("{0:F0}%", popOut.Value * 100f),
+                Tip = () => "Brings more of the scene out toward you. It also eases far backgrounds.",
+                Change = d => Set(popOut, popOut.Value + d * 0.05f, 0f, 1f) });
+            stage.Rows.Add(new MenuRow { Label = "Recenter",
+                Tip = () => "Puts the stage straight in front of where you are looking now.",
+                Press = () => { rig.Recenter(); Log.LogInfo("MENU recenter"); } });
+
+            var pic = new MenuTab { Name = "PICTURE" };
+            pic.Rows.Add(new MenuRow { Label = "Resolution", Value = () => string.Format("{0:F0}%", sharpness.Value * 100f),
+                Tip = ResolutionTip,
+                Change = d => Set(sharpness, sharpness.Value + d * 0.1f, 0.5f, 1.5f) });
+            pic.Rows.Add(new MenuRow { Label = "Sharpen", Value = () => string.Format("{0:F0}%", sharpen.Value * 100f),
+                Tip = () => "Crisper edges. Too high looks harsh. 0% turns it off.",
+                Change = d => Set(sharpen, sharpen.Value + d * 0.1f, 0f, 1f) });
+            pic.Rows.Add(new MenuRow { Label = "Picture", Value = PictureText,
+                Tip = () => "Auto picks for your headset software: Steady on Virtual Desktop, Floating Panel on everything else. "
+                          + "Steady draws the stage into each eye's view and stays still. Floating Panel can look a little sharper, "
+                          + "but Virtual Desktop squashes and shears it when you turn your head."
+                          + (rig.RuntimeName.Length > 0 ? " Detected: " + rig.RuntimeName + "." : ""),
+                Change = d => { CyclePicture(d); Changed(); rig.LogPicture(); return true; } });
+            pic.Rows.Add(new MenuRow { Label = "Surround", Value = SurroundText, Tip = SurroundTip,
+                Change = d => { CycleSurround(d); Changed(); return true; } });
+            pic.Rows.Add(new MenuRow { Label = "Frame catch-up", Value = () => catchUp.Value ? "On" : "Off",
+                Tip = () => "On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. "
+                          + "Off: the game slows down a little whenever frames are missed, as the original game does. Leave it On unless motion looks jumpy.",
+                Change = d => { catchUp.Value = !catchUp.Value; Changed(); return true; } });
+
+            var menuTab = new MenuTab { Name = "MENU" };
+            menuTab.Rows.Add(new MenuRow { Label = "Sounds", Value = () => SoundNames[Mathf.Clamp(soundLevel.Value, 0, 3)],
+                Tip = () => "A soft tone when you move, change a setting, switch tabs, open or close this menu. Off, Low, Medium or High.",
+                Change = d => { int v = Mathf.Clamp(soundLevel.Value + d, 0, 3); if (v == soundLevel.Value) return false; soundLevel.Value = v; sound.Level = v; return true; } });
+            menuTab.Rows.Add(new MenuRow { Label = "Menu size", Value = () => string.Format("{0:F0}%", menuSize.Value * 100f),
+                Tip = () => "Makes this menu bigger or smaller. The stage does not change.",
+                Change = d => { bool c = Set(menuSize, menuSize.Value + d * 0.05f, 0.6f, 1.4f); menu.Size = menuSize.Value; menu.ApplyPlacement(); return c; } });
+            menuTab.Rows.Add(new MenuRow { Label = "Menu height", Value = () => string.Format("{0:+0;-0;0}", Mathf.RoundToInt(menuHeight.Value * 10f)),
+                Tip = () => "Moves this menu up or down on the stage. 0 is the middle.",
+                Change = d => { bool c = Set(menuHeight, menuHeight.Value + d * 0.1f, -1.5f, 1.5f); menu.Height = menuHeight.Value; menu.ApplyPlacement(); return c; } });
+            menuTab.Rows.Add(new MenuRow { Label = "Reset to defaults",
+                Tip = () => "Puts every setting on all three tabs back to how it started.",
+                Press = ResetDefaults });
+            menuTab.Rows.Add(new MenuRow { Label = "Close",
+                Tip = () => "Closes this menu and goes back to the game. Clicking both sticks or pressing " + menu.OpenKey + " also opens and closes it.",
+                Press = () => menu.Close() });
+
+            menu.Tabs.Add(stage);
+            menu.Tabs.Add(pic);
+            menu.Tabs.Add(menuTab);
+        }
+
+        static readonly string[] SoundNames = { "Off", "Low", "Medium", "High" };
+
+        // Sets a value within its limits; false when it was already at the limit, so the menu plays the refused tone.
+        bool Set(ConfigEntry<float> entry, float value, float min, float max)
+        {
+            float v = Mathf.Clamp(value, min, max);
+            if (Mathf.Abs(v - entry.Value) < 0.0001f) return false;
+            entry.Value = v;
+            Changed();
+            return true;
+        }
+
+        void Changed()
+        {
+            PushSettings();
+            Log.LogInfo(string.Format("MENU stage {0:F2} m wide at {1:F2} m, depth {2:F2}, pop-out {3:F2}, sharpen {4:F2}, resolution {5:F2}, picture {6}, surround {7}, catch-up {8}",
+                stageWidth.Value, stageDistance.Value, separation.Value, popOut.Value, sharpen.Value, sharpness.Value, picture.Value, surround.Value, catchUp.Value));
+        }
+
+        string ResolutionTip()
+        {
+            int next = rig.WantedWidth();
+            int nextH = rig.EyeWidth > 0 ? next * rig.EyeHeight / rig.EyeWidth : 0;
+            return string.Format("100% matches your headset at this stage size. Higher costs speed and adds little in this game. Now {0} x {1}{2}.",
+                rig.EyeWidth, rig.EyeHeight, next != rig.EyeWidth ? string.Format(", {0} x {1} when this menu closes", next, nextH) : "");
+        }
+
+        string MenuReadout()
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            if (rig.HeadsetHz > 0f) parts.Add(string.Format("Headset {0:F0} Hz", rig.HeadsetHz));
+            parts.Add(string.Format("eye {0} x {1}", rig.EyeWidth, rig.EyeHeight));
+            if (rig.RecommendedWidth > 0) parts.Add("headset asks " + rig.RecommendedWidth + " wide");
+            if (rig.PadKind != 0) parts.Add(rig.PadKind == 2 ? "DualSense" : "DualShock 4");
+            if (rig.RuntimeName.Length > 0) parts.Add(rig.RuntimeName);
+            return string.Join("   ·   ", parts.ToArray());
+        }
+
+        void ResetDefaults()
+        {
+            stageDistance.Value = DefaultDistance;
+            stageWidth.Value = DefaultWidth;
+            separation.Value = DefaultDepth;
+            popOut.Value = 0f;
+            sharpen.Value = DefaultSharpen;
+            sharpness.Value = 1f;
+            picture.Value = "Auto";
+            surround.Value = "Black";
+            catchUp.Value = true;
+            soundLevel.Value = 2;
+            menuSize.Value = 1f;
+            menuHeight.Value = 0f;
+            sound.Level = 2;
+            menu.Size = 1f;
+            menu.Height = 0f;
+            menu.ApplyPlacement();
+            Changed();
+            Log.LogInfo("MENU defaults");
         }
 
         string PictureText()
         {
             string name = picture.Value == "Steady" ? "Steady" : picture.Value == "Panel" ? "Floating Panel" : "Auto";
             return picture.Value == "Auto" || !(picture.Value == "Steady" || picture.Value == "Panel")
-                ? "Picture: " + name + " (" + rig.ActiveLayerName + ")"
-                : "Picture: " + name;
+                ? name + " (" + rig.ActiveLayerName + ")"
+                : name;
         }
 
         void CyclePicture(int dir)
@@ -185,16 +294,16 @@ namespace OriVR
 
         string SurroundText()
         {
-            if (surround.Value == "Green") return "Surround: Green";
+            if (surround.Value == "Green") return "Green";
             if (surround.Value == "Transparent")
-                return rig.SeeThroughKnown && !rig.CanSeeThrough ? "Surround: Transparent (not offered, black)" : "Surround: Transparent";
-            return "Surround: Black";
+                return rig.SeeThroughKnown && !rig.CanSeeThrough ? "Transparent (not offered)" : "Transparent";
+            return "Black";
         }
 
         string SurroundTip()
         {
             if (surround.Value == "Green")
-                return "Green fills everything around the stage with pure green. In Virtual Desktop, turn on passthrough with the chroma key set to green, and your room shows around the game.";
+                return "Mixed reality: green fills everything around the stage. In Virtual Desktop, turn on passthrough with the chroma key set to green, and your room shows around the game.";
             if (surround.Value == "Transparent")
                 return rig.SeeThroughKnown && !rig.CanSeeThrough
                     ? "Transparent: your headset software does not offer see-through for games, so the surround stays black. Try Green with Virtual Desktop's chroma key instead."
@@ -212,72 +321,6 @@ namespace OriVR
         static int SurroundCode(string value) { return value == "Green" ? 1 : value == "Transparent" ? 2 : 0; }
 
         static int PictureCode(string value) { return value == "Steady" ? 1 : value == "Panel" ? 2 : 0; }
-
-        string MenuRowText(int row)
-        {
-            switch (row)
-            {
-                case 0: return string.Format("Stage distance: {0:F2} m", stageDistance.Value);
-                case 1: return string.Format("Stage size: {0:F2} m", stageWidth.Value);
-                case 2: return string.Format("Depth: {0:F0}%", separation.Value * 100f);
-                case 3: return string.Format("Pop-out: {0:F0}%", popOut.Value * 100f);
-                case 4: return string.Format("Sharpen: {0:F0}%", sharpen.Value * 100f);
-                case 5: return string.Format("Resolution: {0:F0}%   ({1} pixels wide)", sharpness.Value * 100f, rig.WantedWidth());
-                case 6: return PictureText();
-                case 7: return SurroundText();
-                case 8: return "Frame catch-up: " + (catchUp.Value ? "On" : "Off");
-                case 9: return "Recenter";
-                case 10: return "Reset to defaults";
-                default: return "Close";
-            }
-        }
-
-        void MenuAdjust(int row, int dir)
-        {
-            if (row == 0) stageDistance.Value = Mathf.Clamp(stageDistance.Value + dir * 0.05f, 0.5f, 10f);
-            else if (row == 1) stageWidth.Value = Mathf.Clamp(stageWidth.Value + dir * 0.05f, 0.5f, 10f);
-            else if (row == 2) separation.Value = Mathf.Clamp(separation.Value + dir * 0.05f, 0f, 3f);
-            else if (row == 3) popOut.Value = Mathf.Clamp(popOut.Value + dir * 0.05f, 0f, 1f);
-            else if (row == 4) sharpen.Value = Mathf.Clamp(sharpen.Value + dir * 0.1f, 0f, 1f);
-            else if (row == 5) sharpness.Value = Mathf.Clamp(sharpness.Value + dir * 0.1f, 0.5f, 1.5f);
-            else if (row == 6) CyclePicture(dir);
-            else if (row == 7) CycleSurround(dir);
-            else if (row == 8) catchUp.Value = !catchUp.Value;
-            else return;
-            PushSettings();
-            Log.LogInfo(string.Format("MENU stage {0:F2} m wide at {1:F2} m, depth {2:F2}, pop-out {3:F2}, sharpen {4:F2}, resolution {5:F2}, picture {6}, surround {7}", stageWidth.Value, stageDistance.Value, separation.Value, popOut.Value, sharpen.Value, sharpness.Value, picture.Value, surround.Value));
-            if (row == 6) rig.LogPicture();
-        }
-
-        void MenuActivate(int row)
-        {
-            if (row == 6 || row == 7 || row == 8)
-            {
-                MenuAdjust(row, 1);
-                menu.Refresh();
-            }
-            else if (row == 9)
-            {
-                rig.Recenter();
-                Log.LogInfo("MENU recenter");
-            }
-            else if (row == 10)
-            {
-                stageDistance.Value = DefaultDistance;
-                stageWidth.Value = DefaultWidth;
-                separation.Value = DefaultDepth;
-                popOut.Value = 0f;
-                sharpen.Value = DefaultSharpen;
-                sharpness.Value = 1f;
-                picture.Value = "Auto";
-                surround.Value = "Black";
-                catchUp.Value = true;
-                PushSettings();
-                menu.Refresh();
-                Log.LogInfo("MENU defaults");
-            }
-            else if (row == 11) menu.Close();
-        }
 
         void PushSettings()
         {
@@ -346,6 +389,7 @@ namespace OriVR
                         Log.LogInfo("PICTURETEST runtime \"" + name + "\": auto picks " + (XrRig.AutoPicksSteady(name) ? "Steady" : "Floating Panel"));
                 }
                 else if (line == "menu") { if (menu.IsOpen) menu.Close(); else menu.Open(); }
+                else if (line.StartsWith("menutab ")) { var v = line.Split(' '); menu.Select(int.Parse(v[1]), v.Length > 2 ? int.Parse(v[2]) : 0); }
                 else if (line.StartsWith("rate "))
                 {
                     var parts = line.Split(' ');
