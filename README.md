@@ -28,29 +28,56 @@ If the game stays flat for another reason, click both sticks to open the menu. I
 
 ## Settings
 
-Click both sticks at once to open the menu in the headset, on an Xbox pad or a PlayStation DualSense or DualShock 4, or press Insert on the keyboard. The game pauses while it is open. Up and down choose a setting, left and right change it, A (Cross) selects and B (Circle) closes. On the keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes. The key can be changed in the config file (`[Menu] OpenKey`). While the menu is open the game gets no input.
+Click both sticks at once to open the menu in the headset, on an Xbox pad or a PlayStation DualSense or DualShock 4, or press Insert on the keyboard. The game pauses and gets no input while it is open. LB and RB (L1 and R1, or Page Up and Page Down) switch tabs, up and down choose a setting, left and right change it, A (Cross) selects and B (Circle) closes. On the keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes. The key can be changed in the config file (`[Menu] OpenKey`). Every row shows a short explanation at the bottom of the menu.
 
 PlayStation pads (DualSense, DualSense Edge, DualShock 4): not fully verified yet. The best way is **Steam Input on** for Ori (right-click Ori in Steam, Properties, Controller, Enable Steam Input): Steam presents the pad as an Xbox controller and everything maps correctly. With Steam Input off, the mod reads the pad itself and passes it to the game as an Xbox pad (Cross is A, Circle B, Square X, Triangle Y, Options Start), over USB or Bluetooth; that path has had little testing. The game's own button prompts always show Xbox buttons.
 
-Refresh rate: 72, 80 or 90 Hz. Ori gains nothing above 90 Hz, and over a wireless stream (Virtual Desktop, Steam Link, Air Link) a higher rate mostly adds late frames and hitches. Frame catch-up (in the menu, On by default) keeps the game at normal speed when frames come late.
+### Stage
+
+![Stage tab](docs/menu-stage.jpg)
 
 | Setting | What it does |
 |---|---|
 | Stage distance, Stage size | Where the stage sits and how big it is |
 | Depth | How strong the 3D is. Higher makes the world feel smaller and deeper |
 | Pop-out | Brings more of the scene toward you, and eases far backgrounds |
-| Sharpen | Crisper edges. Too high looks harsh |
-| Resolution | 100% matches your headset. Higher costs speed and adds little in this game |
-| Picture | Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head |
-| Surround | What you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black |
-| Frame catch-up | On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. Off: the game slows down a little whenever frames are missed, as the original game does |
 | Recenter | Puts the stage in front of you again |
 
 If far backgrounds strain your eyes, lower Depth or raise Pop-out.
 
+### Picture
+
+![Picture tab](docs/menu-picture.jpg)
+
+| Setting | What it does |
+|---|---|
+| Resolution | 100% matches your headset. Higher costs speed and adds little in this game |
+| Sharpen | Crisper edges. Too high looks harsh |
+| Picture | Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head |
+| Surround | What you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game (mixed reality). Transparent asks your headset software to show your room itself, where it offers that, otherwise black |
+| Frame catch-up | On: when your PC misses a headset frame, the game makes up the lost time on the next one, so it never runs in slow motion. Off: the game slows down a little whenever frames are missed, as the original game does |
+
+### Menu
+
+![Menu tab](docs/menu-menu.jpg)
+
+| Setting | What it does |
+|---|---|
+| Sounds | A soft tone when you move, change a setting or switch tabs. Off, Low, Medium or High |
+| Menu size, Menu height | Make the menu bigger or smaller and move it up or down. The stage does not change |
+| Reset to defaults | Puts every setting on all three tabs back to how it started |
+| Close | Closes the menu |
+
+## Performance tips
+
+- **SteamVR throttling first.** In SteamVR Settings, Video, Per-application video settings, pick Ori and set **Throttling Behavior** to **Fixed** at your headset's refresh rate, and turn **Motion Smoothing** off. On Auto, SteamVR can quietly lower Ori's frame rate after a hitch and keep it there. The mod copes (it follows the real frame rate), but Fixed is smoother.
+- **Use 72, 80 or 90 Hz.** Ori gains nothing above 90 Hz, and over a wireless stream (Virtual Desktop, Steam Link, Air Link) a higher rate mostly adds late frames and hitches.
+- **Leave Frame catch-up On.** It keeps the game at normal speed when frames come late.
+- **Leave the game's VSync off.** The mod keeps it off while VR runs; it would tie the game to your desktop monitor instead of the headset.
+
 ## Good to know
 
-- The game runs one tick per headset frame, so it follows your headset's refresh rate at normal game speed.
+- The game runs one tick per headset frame, so it follows your headset's refresh rate at normal game speed. If the headset delivers frames slower than it says, the mod follows the real frame rate instead.
 - Tested in real headsets on two setups: Pimax Dream Air through SteamVR, and Meta Quest 3 through Virtual Desktop's VDXR. Other headsets and graphics cards should work through OpenXR but have not been tried. Reports are welcome.
 - There is no DLSS. The game is 32-bit, and DLSS needs a 64-bit game.
 - The mod stops the game's telemetry.

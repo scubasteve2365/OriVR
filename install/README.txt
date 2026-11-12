@@ -17,7 +17,7 @@ Play
 3. Load a save. A stage floats in front of you.
 
 Settings
-Click both sticks at once to open the menu (Xbox pad, or a PlayStation DualSense or DualShock 4), or press Insert on the keyboard. The game pauses while it is open and gets no input. Keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes.
+Click both sticks at once to open the menu (Xbox pad, or a PlayStation DualSense or DualShock 4), or press Insert on the keyboard. The game pauses while it is open and gets no input. LB and RB (L1 and R1, or Page Up and Page Down) switch between the Stage, Picture and Menu tabs. Keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes.
 Up and down choose a setting. Left and right change it. A selects. B closes.
 - Stage distance and Stage size: where the stage sits and how big it is.
 - Depth: how strong the 3D is. Higher makes the world feel smaller and deeper. If your eyes strain on far backgrounds, lower it.
@@ -27,6 +27,7 @@ Up and down choose a setting. Left and right change it. A selects. B closes.
 - Picture: Auto picks Steady on Virtual Desktop and Floating Panel on everything else. Steady draws the stage into each eye's view and holds still under Virtual Desktop. Floating Panel can look a little sharper, but Virtual Desktop squashes and shears it when you turn your head.
 - Surround: what you see around the stage. Black is the original look. Green fills it with pure green for Virtual Desktop's chroma-key passthrough, so your room shows around the game. Transparent asks your headset software to show your room itself, where it offers that, otherwise black.
 - Frame catch-up: On keeps the game at normal speed when your PC misses headset frames. Off lets it slow down instead, as the original game does.
+- SteamVR: in Settings, Video, Per-application video settings, set Ori's Throttling Behavior to Fixed at your refresh rate and Motion Smoothing off.
 - Refresh rate: use 72, 80 or 90 Hz. Ori gains nothing above 90 Hz, and over a wireless stream a higher rate mostly adds late frames and hitches.
 - PlayStation pads: not fully verified yet. Best with Steam Input ON for Ori (Steam, right-click Ori, Properties, Controller, Enable Steam Input), so Steam presents the pad as an Xbox controller.
 - Recenter: puts the stage in front of you again.
