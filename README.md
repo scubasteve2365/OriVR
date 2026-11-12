@@ -30,7 +30,7 @@ If the game stays flat for another reason, click both sticks to open the menu. I
 
 Click both sticks at once to open the menu in the headset, on an Xbox pad or a PlayStation DualSense or DualShock 4, or press Insert on the keyboard. The game pauses and gets no input while it is open. LB and RB (L1 and R1, or Page Up and Page Down) switch tabs, up and down choose a setting, left and right change it, A (Cross) selects and B (Circle) closes. On the keyboard: arrow keys choose and change, Enter selects, Insert, Esc or Backspace closes. The key can be changed in the config file (`[Menu] OpenKey`). Every row shows a short explanation at the bottom of the menu.
 
-PlayStation pads (DualSense, DualSense Edge, DualShock 4): not fully verified yet. The best way is **Steam Input on** for Ori (right-click Ori in Steam, Properties, Controller, Enable Steam Input): Steam presents the pad as an Xbox controller and everything maps correctly. With Steam Input off, the mod reads the pad itself and passes it to the game as an Xbox pad (Cross is A, Circle B, Square X, Triangle Y, Options Start), over USB or Bluetooth; that path has had little testing. The game's own button prompts always show Xbox buttons.
+PlayStation pads (DualSense, DualSense Edge, DualShock 4): support added but untested. If your DualSense has any issues, turn **Steam Input on** for Ori (right-click Ori in Steam, Properties, Controller, Enable Steam Input) so Steam maps it as an Xbox controller. With Steam Input off, the mod reads the pad itself and passes it to the game as an Xbox pad (Cross is A, Circle B, Square X, Triangle Y, Options Start), over USB or Bluetooth; that path has had little testing. The game's own button prompts always show Xbox buttons.
 
 ### Stage
 
